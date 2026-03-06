@@ -14,6 +14,227 @@
 # Public functions
 # ---------------------------------------------------------------------------
 
+$script:AcceptedDomains = $null
+
+function Get-ExchangeAcceptedDomains {
+    [CmdletBinding()]
+    param()
+
+    if ($null -ne $script:AcceptedDomains) {
+        return $script:AcceptedDomains
+    }
+
+    try {
+        $domains = @(Get-AcceptedDomain -ErrorAction Stop | Select-Object -ExpandProperty DomainName)
+        $script:AcceptedDomains = @($domains | ForEach-Object { $_.ToString().ToLowerInvariant() } | Sort-Object -Unique)
+    }
+    catch {
+        Write-EvidenceLog "Could not retrieve accepted domains (using UPN domain fallback): $($_.Exception.Message)" -Level Warning
+        return @()
+    }
+
+    return $script:AcceptedDomains
+}
+
+function Get-ExchangeTargetEmailAddress {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        $Target
+    )
+
+    if ($null -eq $Target) {
+        return $null
+    }
+
+    $targetText = if ($Target -is [string]) {
+        $Target
+    }
+    elseif ($Target.PSObject.Properties['PrimarySmtpAddress']) {
+        [string]$Target.PrimarySmtpAddress
+    }
+    elseif ($Target.PSObject.Properties['Address']) {
+        [string]$Target.Address
+    }
+    else {
+        [string]$Target
+    }
+
+    if ($targetText -match '(?i)(?:smtp:)?([a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,})') {
+        return $Matches[1].ToLowerInvariant()
+    }
+
+    return $null
+}
+
+function Add-NormalizedRecipientKey {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.Generic.HashSet[string]]$Keys,
+
+        [AllowNull()]
+        $Candidate
+    )
+
+    if ($null -eq $Candidate) {
+        return
+    }
+
+    $text = $Candidate.ToString().Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return
+    }
+
+    if ($text -match '^(?i)smtp:(.+@.+)$') {
+        $text = $Matches[1]
+    }
+
+    [void]$Keys.Add($text.ToLowerInvariant())
+}
+
+function Get-NormalizedRecipientKeys {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        $Value
+    )
+
+    $keys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    foreach ($item in @($Value)) {
+        if ($null -eq $item) {
+            continue
+        }
+
+        foreach ($propertyName in @(
+            'PrimarySmtpAddress',
+            'WindowsEmailAddress',
+            'Address',
+            'UserPrincipalName',
+            'Alias',
+            'LegacyExchangeDN',
+            'DistinguishedName',
+            'Guid',
+            'ExchangeGuid',
+            'Identity'
+        )) {
+            if ($item.PSObject.Properties[$propertyName]) {
+                Add-NormalizedRecipientKey -Keys $keys -Candidate $item.$propertyName
+            }
+        }
+
+        if ($item.PSObject.Properties['EmailAddresses']) {
+            foreach ($address in @($item.EmailAddresses)) {
+                Add-NormalizedRecipientKey -Keys $keys -Candidate $address
+            }
+        }
+
+        Add-NormalizedRecipientKey -Keys $keys -Candidate $item
+    }
+
+    return $keys
+}
+
+function Test-RecipientCollectionMatchesMailbox {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        $Recipients,
+
+        [Parameter(Mandatory)]
+        [System.Collections.Generic.HashSet[string]]$MailboxKeys
+    )
+
+    $recipientKeys = Get-NormalizedRecipientKeys -Value $Recipients
+    return $recipientKeys.Overlaps($MailboxKeys)
+}
+
+function Resolve-DefaultCalendarFolderIdentity {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Mailbox
+    )
+
+    if (Get-Command -Name 'Get-EXOMailboxFolderStatistics' -ErrorAction SilentlyContinue) {
+        $stats = @(Get-EXOMailboxFolderStatistics -Identity $Mailbox -FolderScope Calendar -ErrorAction Stop)
+    }
+    else {
+        $stats = @(Get-MailboxFolderStatistics -Identity $Mailbox -FolderScope Calendar -ErrorAction Stop)
+    }
+
+    $defaultCalendar = @($stats | Where-Object { $_.FolderType -eq 'Calendar' } | Select-Object -First 1)
+    if (-not $defaultCalendar) {
+        $defaultCalendar = @(
+            $stats |
+            Sort-Object @{ Expression = { ($_.FolderPath -split '/').Count } }, FolderPath |
+            Select-Object -First 1
+        )
+    }
+
+    if (-not $defaultCalendar) {
+        throw "Could not resolve the default calendar folder for $Mailbox."
+    }
+
+    $folderPath = $defaultCalendar[0].FolderPath -replace '/', '\\'
+    return "${Mailbox}:${folderPath}"
+}
+
+function Test-IsExternalExchangeTarget {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        $Target,
+
+        [Parameter(Mandatory)]
+        [string]$FallbackDomain
+    )
+
+    $emailAddress = Get-ExchangeTargetEmailAddress -Target $Target
+    if (-not $emailAddress) {
+        return $false
+    }
+
+    $domain = ($emailAddress -split '@')[-1].ToLowerInvariant()
+    $acceptedDomains = @(Get-ExchangeAcceptedDomains)
+
+    if ($acceptedDomains.Count -gt 0) {
+        return $domain -notin $acceptedDomains
+    }
+
+    return $domain -ne $FallbackDomain.ToLowerInvariant()
+}
+
+function Get-PagedMessageTrace {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$BaseParameters,
+
+        [string]$TraceLabel = 'message trace'
+    )
+
+    $pageSize = 5000
+    $page = 1
+    $results = [System.Collections.Generic.List[object]]::new()
+
+    do {
+        $pageResults = @(Get-MessageTrace @BaseParameters -PageSize $pageSize -Page $page -ErrorAction Stop)
+        foreach ($item in $pageResults) {
+            $results.Add($item)
+        }
+
+        if ($page -gt 1 -and $pageResults.Count -gt 0) {
+            Write-EvidenceLog "Collected page $page for $TraceLabel ($($pageResults.Count) rows)." -Level Info
+        }
+
+        $page++
+    } while ($pageResults.Count -eq $pageSize)
+
+    return @($results)
+}
+
 function Export-ExchangeMailboxDetails {
     <#
     .SYNOPSIS
@@ -108,6 +329,7 @@ function Export-ExchangeInboxRules {
     Write-EvidenceLog "Collecting inbox rules for $UserPrincipalName..." -Level Info
 
     try {
+        $fallbackDomain = ($UserPrincipalName -split '@')[1]
         $rules = @(Get-InboxRule -Mailbox $UserPrincipalName -IncludeHidden -ErrorAction Stop)
 
         $jsonPath = Join-Path $OutputFolder 'InboxRules.json'
@@ -146,7 +368,7 @@ function Export-ExchangeInboxRules {
 
             if ($forwardTargets.Count -gt 0) {
                 $externalTargets = @($forwardTargets | Where-Object {
-                    $_ -match 'smtp:' -or $_ -match '@' -and $_ -notmatch [regex]::Escape(($UserPrincipalName -split '@')[1])
+                    Test-IsExternalExchangeTarget -Target $_ -FallbackDomain $fallbackDomain
                 })
                 if ($externalTargets.Count -gt 0) {
                     Register-Indicator -Category 'SuspiciousInboxRule' `
@@ -257,10 +479,25 @@ function Export-ExchangeMailboxPermissions {
         })
         Export-EvidenceData -Data $flatSA -FilePath $csvPath -Format 'CSV' -Description 'Mailbox permissions - SendAs'
 
-        $nonStandardSA = @($sendAs | Where-Object {
-            $_.Trustee -notmatch 'NT AUTHORITY\\SELF'
-        })
-        foreach ($perm in $nonStandardSA) {
+        $effectiveSendAs = @(
+            $sendAs |
+            Where-Object {
+                $_.Trustee -and
+                $_.Trustee -notmatch '^NT AUTHORITY\\SELF$' -and
+                ($_.AccessRights -contains 'SendAs')
+            } |
+            Group-Object { $_.Trustee.ToString().Trim().ToLowerInvariant() } |
+            ForEach-Object {
+                $allowEntries = @($_.Group | Where-Object { $_.AccessControlType -eq 'Allow' })
+                $denyEntries = @($_.Group | Where-Object { $_.AccessControlType -eq 'Deny' })
+
+                if ($allowEntries.Count -gt 0 -and $denyEntries.Count -eq 0) {
+                    $allowEntries
+                }
+            }
+        )
+
+        foreach ($perm in $effectiveSendAs) {
             Register-Indicator -Category 'MailboxPermission' `
                 -Description "Non-default SendAs permission: $($perm.Trustee)" `
                 -Severity 'Medium' `
@@ -323,6 +560,7 @@ function Export-ExchangeForwarding {
     Write-EvidenceLog "Collecting forwarding summary for $UserPrincipalName..." -Level Info
 
     try {
+        $fallbackDomain = ($UserPrincipalName -split '@')[1]
         $forwardingItems = [System.Collections.Generic.List[PSCustomObject]]::new()
 
         # Check mailbox properties
@@ -401,9 +639,8 @@ function Export-ExchangeForwarding {
 
         # Flag external forwarding
         if ($forwardingItems.Count -gt 0) {
-            $tenantDomain = ($UserPrincipalName -split '@')[1]
             $externalItems = @($forwardingItems | Where-Object {
-                $_.Target -and $_.Target -notmatch [regex]::Escape($tenantDomain)
+                Test-IsExternalExchangeTarget -Target $_.Target -FallbackDomain $fallbackDomain
             })
 
             if ($externalItems.Count -gt 0) {
@@ -442,7 +679,8 @@ function Export-ExchangeCalendarDelegates {
     Write-EvidenceLog "Collecting calendar permissions for $UserPrincipalName..." -Level Info
 
     try {
-        $calPerms = @(Get-MailboxFolderPermission -Identity "${UserPrincipalName}:\Calendar" -ErrorAction Stop)
+        $calendarIdentity = Resolve-DefaultCalendarFolderIdentity -Mailbox $UserPrincipalName
+        $calPerms = @(Get-MailboxFolderPermission -Identity $calendarIdentity -ErrorAction Stop)
 
         $jsonPath = Join-Path $OutputFolder 'CalendarPermissions.json'
         Export-EvidenceData -Data $calPerms -FilePath $jsonPath -Format 'JSON' -Description 'Calendar folder permissions'
@@ -502,6 +740,16 @@ function Export-ExchangeTransportRules {
     Write-EvidenceLog "Collecting transport rules (tenant-wide)..." -Level Info
 
     try {
+        $mailboxKeys = $null
+        try {
+            $mailbox = Get-Mailbox -Identity $UserPrincipalName -ErrorAction Stop
+            $mailboxKeys = Get-NormalizedRecipientKeys -Value @($mailbox, $UserPrincipalName)
+        }
+        catch {
+            Write-EvidenceLog "Could not resolve mailbox identifiers for transport rule matching; using UPN-only matching: $($_.Exception.Message)" -Level Warning
+            $mailboxKeys = Get-NormalizedRecipientKeys -Value @($UserPrincipalName)
+        }
+
         $rules = @(Get-TransportRule -ErrorAction Stop)
 
         $jsonPath = Join-Path $OutputFolder 'TransportRules.json'
@@ -532,10 +780,10 @@ function Export-ExchangeTransportRules {
             $affectsUser = $false
             $reason = ''
 
-            if ($rule.SentTo -and $rule.SentTo -contains $UserPrincipalName) {
+            if ($rule.SentTo -and (Test-RecipientCollectionMatchesMailbox -Recipients $rule.SentTo -MailboxKeys $mailboxKeys)) {
                 $affectsUser = $true; $reason = "SentTo matches"
             }
-            if ($rule.From -and $rule.From -contains $UserPrincipalName) {
+            if ($rule.From -and (Test-RecipientCollectionMatchesMailbox -Recipients $rule.From -MailboxKeys $mailboxKeys)) {
                 $affectsUser = $true; $reason = "From matches"
             }
 
@@ -652,8 +900,11 @@ function Export-ExchangeMessageTrace {
 
     # Sent messages
     try {
-        $sentMessages = @(Get-MessageTrace -SenderAddress $UserPrincipalName `
-            -StartDate $startDate -EndDate $endDate -PageSize 5000 -ErrorAction Stop)
+        $sentMessages = @(Get-PagedMessageTrace -BaseParameters @{
+                SenderAddress = $UserPrincipalName
+                StartDate     = $startDate
+                EndDate       = $endDate
+            } -TraceLabel 'sent message trace')
 
         $csvPath = Join-Path $OutputFolder 'MessageTrace_Sent.csv'
         Export-EvidenceData -Data $sentMessages -FilePath $csvPath -Format 'CSV' -Description 'Message trace - sent messages (last 7 days)'
@@ -668,8 +919,11 @@ function Export-ExchangeMessageTrace {
 
     # Received messages
     try {
-        $receivedMessages = @(Get-MessageTrace -RecipientAddress $UserPrincipalName `
-            -StartDate $startDate -EndDate $endDate -PageSize 5000 -ErrorAction Stop)
+        $receivedMessages = @(Get-PagedMessageTrace -BaseParameters @{
+                RecipientAddress = $UserPrincipalName
+                StartDate        = $startDate
+                EndDate          = $endDate
+            } -TraceLabel 'received message trace')
 
         $csvPath = Join-Path $OutputFolder 'MessageTrace_Received.csv'
         Export-EvidenceData -Data $receivedMessages -FilePath $csvPath -Format 'CSV' -Description 'Message trace - received messages (last 7 days)'
@@ -701,9 +955,9 @@ function Export-ExchangeMessageTrace {
 
     # Flag high-volume outbound
     if ($sentMessages.Count -gt 0) {
-        $tenantDomain = ($UserPrincipalName -split '@')[1]
+        $fallbackDomain = ($UserPrincipalName -split '@')[1]
         $externalRecipients = @($sentMessages |
-            Where-Object { $_.RecipientAddress -notmatch [regex]::Escape($tenantDomain) } |
+            Where-Object { Test-IsExternalExchangeTarget -Target $_.RecipientAddress -FallbackDomain $fallbackDomain } |
             Select-Object -ExpandProperty RecipientAddress -Unique)
 
         if ($externalRecipients.Count -gt 100) {

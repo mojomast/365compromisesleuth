@@ -158,9 +158,20 @@ function Export-EvidenceData {
                ($Data -is [string] -and [string]::IsNullOrWhiteSpace($Data))
 
     if ($isEmpty) {
-        # Write a marker file so the technician knows collection ran but found nothing
-        "[No data returned for: $Description]" | Out-File -FilePath $FilePath -Encoding utf8
-        Write-EvidenceLog "No data for: $Description (empty marker written)" -Level Warning
+        switch ($Format) {
+            'CSV' {
+                [System.IO.File]::WriteAllText($FilePath, [string]::Empty, [System.Text.UTF8Encoding]::new($false))
+            }
+            'JSON' {
+                $emptyJson = if ($Data -is [System.Collections.IDictionary]) { '{}' } else { '[]' }
+                [System.IO.File]::WriteAllText($FilePath, $emptyJson, [System.Text.UTF8Encoding]::new($false))
+            }
+            'TXT' {
+                "[No data returned for: $Description]" | Out-File -FilePath $FilePath -Encoding utf8
+            }
+        }
+
+        Write-EvidenceLog "No data for: $Description (valid empty $Format file written)" -Level Warning
     }
     else {
         switch ($Format) {
@@ -173,7 +184,7 @@ function Export-EvidenceData {
                 }
             }
             'JSON' {
-                $Data | ConvertTo-Json -Depth 10 -EnumsAsStrings | Out-File -FilePath $FilePath -Encoding utf8
+                $Data | ConvertTo-Json -Depth 25 -EnumsAsStrings | Out-File -FilePath $FilePath -Encoding utf8
             }
             'TXT' {
                 if ($Data -is [string]) {

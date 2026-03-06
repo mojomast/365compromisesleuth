@@ -106,7 +106,7 @@ try {
     # ------------------------------------------------------------------
     # Step 3: Check module prerequisites
     # ------------------------------------------------------------------
-    $prereqResult = Test-Prerequisites
+    $prereqResult = Test-Prerequisites -SkipGraph:$SkipGraph -SkipExchange:$SkipExchange
     if (-not $prereqResult.Pass) {
         Write-EvidenceLog 'Aborting: One or more required modules are missing or outdated. See above for install commands.' -Level Error
         exit 1
@@ -125,7 +125,7 @@ try {
     # ------------------------------------------------------------------
     # Step 6: Print banner with case information
     # ------------------------------------------------------------------
-    $bannerTimestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss (UTC zzz)'
+    $bannerTimestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss 'UTC' zzz")
 
     Write-EvidenceLog '========================================================' -Level Section
     Write-EvidenceLog "$script:ToolName" -Level Section

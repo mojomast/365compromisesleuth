@@ -40,14 +40,39 @@ function Test-Prerequisites {
         if (-not $result.Pass) { $result.Details | Where-Object { -not $_.Installed } }
     #>
     [CmdletBinding()]
-    param()
+    param(
+        [switch]$SkipGraph,
+
+        [switch]$SkipExchange
+    )
 
     Write-EvidenceLog '--- Checking prerequisites ---' -Level Section
+
+    $requiredModules = @(
+        foreach ($req in $script:RequiredModules) {
+            $isGraphModule = $req.Name -like 'Microsoft.Graph.*'
+            $isExchangeModule = $req.Name -eq 'ExchangeOnlineManagement'
+
+            if (($SkipGraph -and $isGraphModule) -or ($SkipExchange -and $isExchangeModule)) {
+                continue
+            }
+
+            $req
+        }
+    )
+
+    if ($requiredModules.Count -eq 0) {
+        Write-EvidenceLog 'No service modules are required for the selected skip options.' -Level Info
+        return [PSCustomObject]@{
+            Pass    = $true
+            Details = @()
+        }
+    }
 
     $results = [System.Collections.Generic.List[PSCustomObject]]::new()
     $allPassed = $true
 
-    foreach ($req in $script:RequiredModules) {
+    foreach ($req in $requiredModules) {
         $moduleName = $req.Name
         $minVersion = [version]$req.MinVersion
 

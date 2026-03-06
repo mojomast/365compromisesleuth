@@ -14,6 +14,16 @@
 # Public functions
 # ---------------------------------------------------------------------------
 
+function New-ODataStringLiteral {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Value
+    )
+
+    return "'" + ($Value -replace "'", "''") + "'"
+}
+
 function Export-EntraUserProfile {
     <#
     .SYNOPSIS
@@ -277,7 +287,16 @@ function Export-EntraSignInLogs {
 
     try {
         $dateFilter = (Get-Date).AddDays(-7).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-        $filter = "userPrincipalName eq '$UserPrincipalName' and createdDateTime ge $dateFilter"
+        $safeUpn = New-ODataStringLiteral -Value $UserPrincipalName
+
+        try {
+            $user = Get-MgUser -UserId $UserPrincipalName -Property Id -ErrorAction Stop
+            $filter = "userId eq '$($user.Id)' and createdDateTime ge $dateFilter"
+        }
+        catch {
+            Write-EvidenceLog "Could not resolve user object ID for sign-in lookup; falling back to UPN filter: $($_.Exception.Message)" -Level Warning
+            $filter = "userPrincipalName eq $safeUpn and createdDateTime ge $dateFilter"
+        }
 
         $signIns = @(Get-MgAuditLogSignIn -Filter $filter -Top 500 -All -ErrorAction Stop)
 
@@ -354,9 +373,11 @@ function Export-EntraRiskData {
 
     Write-EvidenceLog "Collecting risk data for $UserPrincipalName (requires Entra P2)..." -Level Info
 
+    $safeUpn = New-ODataStringLiteral -Value $UserPrincipalName
+
     # Risky User
     try {
-        $riskyUser = @(Get-MgRiskyUser -Filter "userPrincipalName eq '$UserPrincipalName'" -ErrorAction Stop)
+        $riskyUser = @(Get-MgRiskyUser -Filter "userPrincipalName eq $safeUpn" -ErrorAction Stop)
 
         $jsonPath = Join-Path $OutputFolder 'RiskyUser.json'
         Export-EvidenceData -Data $riskyUser -FilePath $jsonPath -Format 'JSON' -Description 'Risky user status (Entra ID P2)'
@@ -384,7 +405,7 @@ function Export-EntraRiskData {
 
     # Risk Detections
     try {
-        $riskDetections = @(Get-MgRiskDetection -Filter "userPrincipalName eq '$UserPrincipalName'" -ErrorAction Stop)
+        $riskDetections = @(Get-MgRiskDetection -Filter "userPrincipalName eq $safeUpn" -All -ErrorAction Stop)
 
         $jsonPath = Join-Path $OutputFolder 'RiskDetections.json'
         Export-EvidenceData -Data $riskDetections -FilePath $jsonPath -Format 'JSON' -Description 'Risk detections (Entra ID P2)'
@@ -422,34 +443,38 @@ function Export-EntraAuditLogs {
 
     try {
         $dateFilter = (Get-Date).AddDays(-7).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $safeUpn = New-ODataStringLiteral -Value $UserPrincipalName
         $auditLogs = $null
 
         # Try the targeted filter first
         try {
-            $filter = "targetResources/any(t: t/userPrincipalName eq '$UserPrincipalName') and activityDateTime ge $dateFilter"
+            $filter = "targetResources/any(t: t/userPrincipalName eq $safeUpn) and activityDateTime ge $dateFilter"
             $auditLogs = @(Get-MgAuditLogDirectoryAudit -Filter $filter -Top 500 -All -ErrorAction Stop)
         }
         catch {
             Write-EvidenceLog "Targeted audit log filter failed, trying broader initiatedBy filter..." -Level Warning
             try {
-                $filter = "initiatedBy/user/userPrincipalName eq '$UserPrincipalName' and activityDateTime ge $dateFilter"
+                $filter = "initiatedBy/user/userPrincipalName eq $safeUpn and activityDateTime ge $dateFilter"
                 $auditLogs = @(Get-MgAuditLogDirectoryAudit -Filter $filter -Top 500 -All -ErrorAction Stop)
             }
             catch {
-                Write-EvidenceLog "Broader audit log filter also failed. Collecting recent audit logs and filtering client-side..." -Level Warning
+                Write-EvidenceLog 'Audit log filters failed. Using a capped recent-audits fallback and filtering client-side; results may be incomplete.' -Level Warning
                 $filter = "activityDateTime ge $dateFilter"
-                $allLogs = @(Get-MgAuditLogDirectoryAudit -Filter $filter -Top 1000 -All -ErrorAction Stop)
+                $allLogs = @(Get-MgAuditLogDirectoryAudit -Filter $filter -Top 1000 -ErrorAction Stop)
                 $auditLogs = @($allLogs | Where-Object {
                     $upnMatch = $false
+
                     foreach ($target in $_.TargetResources) {
                         if ($target.UserPrincipalName -eq $UserPrincipalName) {
                             $upnMatch = $true
                             break
                         }
                     }
+
                     if (-not $upnMatch -and $_.InitiatedBy.User.UserPrincipalName -eq $UserPrincipalName) {
                         $upnMatch = $true
                     }
+
                     $upnMatch
                 })
             }

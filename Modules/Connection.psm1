@@ -111,6 +111,99 @@ function Disconnect-IncidentServices {
 # Private helper functions
 # ---------------------------------------------------------------------------
 
+function Resolve-ExchangeDelegatedOrganization {
+    [CmdletBinding()]
+    param(
+        [string]$TenantId
+    )
+
+    if (-not $TenantId) {
+        return $null
+    }
+
+    if ($TenantId -match '^[0-9a-fA-F-]{36}$') {
+        return $TenantId
+    }
+
+    if ($TenantId -match '(?i)\.onmicrosoft\.com$') {
+        return $TenantId
+    }
+
+    $graphContext = Get-MgContext -ErrorAction SilentlyContinue
+    if (-not $graphContext) {
+        throw 'A non-.onmicrosoft.com tenant domain requires an active Graph connection to resolve the Exchange delegated organization.'
+    }
+
+    $organization = Get-MgOrganization -ErrorAction Stop | Select-Object -First 1
+    $initialDomain = @($organization.VerifiedDomains | Where-Object { $_.IsInitial -eq $true } | Select-Object -ExpandProperty Name -First 1)
+
+    if ($initialDomain) {
+        return $initialDomain[0]
+    }
+
+    throw 'Unable to resolve the tenant initial .onmicrosoft.com domain for Exchange delegated access.'
+}
+
+function Get-ExchangeConnectionAttempts {
+    [CmdletBinding()]
+    param(
+        [string]$TenantId
+    )
+
+    $attempts = [System.Collections.Generic.List[hashtable]]::new()
+
+    if (-not $TenantId) {
+        $attempts.Add(@{
+            Name       = 'interactive default context'
+            Parameters = @{}
+        })
+        return $attempts
+    }
+
+    $isGuid = $TenantId -match '^[0-9a-fA-F-]{36}$'
+    $isOnMicrosoft = $TenantId -match '(?i)\.onmicrosoft\.com$'
+    $resolvedDelegatedOrganization = $null
+
+    if ($isGuid -or $isOnMicrosoft) {
+        $resolvedDelegatedOrganization = $TenantId
+    }
+    else {
+        try {
+            $resolvedDelegatedOrganization = Resolve-ExchangeDelegatedOrganization -TenantId $TenantId
+        }
+        catch {
+            Write-EvidenceLog "Could not resolve delegated Exchange organization from '$TenantId': $($_.Exception.Message)" -Level Warning
+        }
+    }
+
+    if ($resolvedDelegatedOrganization) {
+        $attempts.Add(@{
+            Name       = "delegated organization '$resolvedDelegatedOrganization'"
+            Parameters = @{ DelegatedOrganization = $resolvedDelegatedOrganization }
+        })
+    }
+
+    if (-not $isGuid) {
+        $attempts.Add(@{
+            Name       = "organization '$TenantId'"
+            Parameters = @{ Organization = $TenantId }
+        })
+    }
+
+    if ($isGuid) {
+        $attempts.Add(@{
+            Name       = 'interactive default context'
+            Parameters = @{}
+        })
+    }
+
+    if ($attempts.Count -eq 0) {
+        throw "Unable to determine a safe Exchange connection strategy for tenant identifier '$TenantId'."
+    }
+
+    return $attempts
+}
+
 function Connect-IncidentGraph {
     <#
     .SYNOPSIS
@@ -178,26 +271,28 @@ function Connect-IncidentExchange {
     Write-EvidenceLog 'Connecting to Exchange Online...' -Level Info
 
     try {
-        $connectParams = @{
-            ShowBanner = $false
+        $connectAttempts = @(Get-ExchangeConnectionAttempts -TenantId $TenantId)
+        $lastError = $null
+
+        foreach ($attempt in $connectAttempts) {
+            $connectParams = @{ ShowBanner = $false }
+            foreach ($key in $attempt.Parameters.Keys) {
+                $connectParams[$key] = $attempt.Parameters[$key]
+            }
+
+            try {
+                Write-EvidenceLog "Exchange connection attempt using $($attempt.Name)..." -Level Info
+                Connect-ExchangeOnline @connectParams -ErrorAction Stop
+                Write-EvidenceLog 'Exchange Online connected successfully.' -Level Success
+                return $true
+            }
+            catch {
+                $lastError = $_
+                Write-EvidenceLog "Exchange connection attempt failed using $($attempt.Name): $($_.Exception.Message)" -Level Warning
+            }
         }
 
-        # For Exchange Online, use Organization parameter if TenantId looks like a domain
-        if ($TenantId) {
-            # If it looks like a GUID, it may not work directly with -Organization
-            # If it looks like a domain, use it
-            if ($TenantId -match '\.') {
-                $connectParams['Organization'] = $TenantId
-            }
-            else {
-                # For GUID tenants, we rely on the interactive login to pick the right tenant
-                Write-EvidenceLog "TenantId is a GUID; Exchange will use interactive login context." -Level Info
-            }
-        }
-
-        Connect-ExchangeOnline @connectParams -ErrorAction Stop
-        Write-EvidenceLog 'Exchange Online connected successfully.' -Level Success
-        return $true
+        throw $lastError
     }
     catch {
         Register-CollectionError -FunctionName 'Connect-IncidentExchange' `
