@@ -24,6 +24,74 @@ function New-ODataStringLiteral {
     return "'" + ($Value -replace "'", "''") + "'"
 }
 
+function ConvertTo-PlainGraphObject {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        $InputObject
+    )
+
+    if ($null -eq $InputObject) {
+        return $null
+    }
+
+    if ($InputObject -is [string] -or
+        $InputObject -is [char] -or
+        $InputObject -is [bool] -or
+        $InputObject -is [byte] -or
+        $InputObject -is [int16] -or
+        $InputObject -is [int32] -or
+        $InputObject -is [int64] -or
+        $InputObject -is [uint16] -or
+        $InputObject -is [uint32] -or
+        $InputObject -is [uint64] -or
+        $InputObject -is [single] -or
+        $InputObject -is [double] -or
+        $InputObject -is [decimal] -or
+        $InputObject -is [datetime] -or
+        $InputObject -is [datetimeoffset] -or
+        $InputObject -is [timespan] -or
+        $InputObject -is [guid] -or
+        $InputObject -is [uri]) {
+        return $InputObject
+    }
+
+    if ($InputObject.GetType().IsEnum) {
+        return $InputObject.ToString()
+    }
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        $dictionaryResult = [ordered]@{}
+        foreach ($key in $InputObject.Keys) {
+            $dictionaryResult[$key] = ConvertTo-PlainGraphObject -InputObject $InputObject[$key]
+        }
+        return [PSCustomObject]$dictionaryResult
+    }
+
+    if ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [string]) {
+        return @($InputObject | ForEach-Object { ConvertTo-PlainGraphObject -InputObject $_ })
+    }
+
+    $result = [ordered]@{}
+    foreach ($property in $InputObject.PSObject.Properties) {
+        if ($property.Name -in @('BackingStore', 'AdditionalProperties')) {
+            continue
+        }
+
+        $result[$property.Name] = ConvertTo-PlainGraphObject -InputObject $property.Value
+    }
+
+    if ($InputObject.PSObject.Properties['AdditionalProperties'] -and $InputObject.AdditionalProperties) {
+        foreach ($key in $InputObject.AdditionalProperties.Keys) {
+            if (-not $result.Contains($key)) {
+                $result[$key] = ConvertTo-PlainGraphObject -InputObject $InputObject.AdditionalProperties[$key]
+            }
+        }
+    }
+
+    return [PSCustomObject]$result
+}
+
 function Export-EntraUserProfile {
     <#
     .SYNOPSIS
@@ -44,10 +112,11 @@ function Export-EntraUserProfile {
 
     try {
         $user = Get-MgUser -UserId $UserPrincipalName -Property * -ErrorAction Stop
+        $userJson = ConvertTo-PlainGraphObject -InputObject $user
 
         # Full JSON export
         $jsonPath = Join-Path $OutputFolder 'UserProfile.json'
-        Export-EvidenceData -Data $user -FilePath $jsonPath -Format 'JSON' -Description 'Entra ID user profile (full)'
+        Export-EvidenceData -Data $userJson -FilePath $jsonPath -Format 'JSON' -Description 'Entra ID user profile (full)'
 
         # Flattened CSV with key fields
         $flatUser = [PSCustomObject]@{
