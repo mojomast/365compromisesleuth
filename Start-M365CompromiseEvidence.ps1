@@ -14,7 +14,8 @@
     evidence collection, and summary generation.
 
 .PARAMETER UserPrincipalName
-    The UPN (email address) of the compromised user to investigate.
+    Optional. The UPN (email address) of the compromised user to investigate.
+    If omitted, the script prompts for the target account after startup.
 
 .PARAMETER CaseFolder
     Path to the root case folder. Parent directory must already exist.
@@ -33,6 +34,9 @@
     or Exchange access is unavailable.
 
 .EXAMPLE
+    ./Start-M365CompromiseEvidence.ps1 -CaseFolder "C:\Cases\Contoso-2025-01-15"
+
+.EXAMPLE
     ./Start-M365CompromiseEvidence.ps1 -UserPrincipalName "user@contoso.com" -CaseFolder "C:\Cases\Contoso-2025-01-15"
 
 .EXAMPLE
@@ -47,8 +51,6 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
-    [ValidatePattern('^[^@]+@[^@]+\.[^@]+$')]
     [string]$UserPrincipalName,
 
     [Parameter(Mandatory)]
@@ -72,6 +74,7 @@ param(
 # ===========================================================================
 $script:ToolVersion = '1.0.0'
 $script:ToolName    = 'M365 Compromise Evidence Collection Tool'
+$script:UpnPattern  = '^[^@]+@[^@]+\.[^@]+$'
 
 # ===========================================================================
 # Import modules from ./Modules/ relative to this script's location
@@ -85,6 +88,37 @@ Import-Module (Join-Path $modulesPath 'Connection.psm1') -Force
 Import-Module (Join-Path $modulesPath 'EntraEvidence.psm1') -Force
 Import-Module (Join-Path $modulesPath 'ExchangeEvidence.psm1') -Force
 Import-Module (Join-Path $modulesPath 'Summary.psm1') -Force
+
+function Read-TargetUserPrincipalName {
+    [CmdletBinding()]
+    param(
+        [string]$InitialValue
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($InitialValue)) {
+        $candidate = $InitialValue.Trim()
+        if ($candidate -match $script:UpnPattern) {
+            return $candidate
+        }
+
+        throw "UserPrincipalName must be a valid email address. Received: $InitialValue"
+    }
+
+    while ($true) {
+        $candidate = Read-Host 'Enter the compromised user UPN to investigate (admin sign-in can be different)'
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            Write-Host 'A target user UPN is required.'
+            continue
+        }
+
+        $candidate = $candidate.Trim()
+        if ($candidate -match $script:UpnPattern) {
+            return $candidate
+        }
+
+        Write-Host 'Please enter a valid email address such as user@contoso.com.'
+    }
+}
 
 # ===========================================================================
 # Main execution body - wrapped in try/finally for clean teardown
@@ -111,6 +145,8 @@ try {
         Write-EvidenceLog 'Aborting: One or more required modules are missing or outdated. See above for install commands.' -Level Error
         exit 1
     }
+
+    $UserPrincipalName = Read-TargetUserPrincipalName -InitialValue $UserPrincipalName
 
     # ------------------------------------------------------------------
     # Step 4: Create case folder structure

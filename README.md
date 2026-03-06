@@ -54,7 +54,10 @@ Admin consent may be required for some scopes in the target tenant.
 ## Quick Start
 
 ```powershell
-# Basic usage
+# Basic usage with prompt for compromised account
+./Start-M365CompromiseEvidence.ps1 -CaseFolder "C:\Cases\Contoso-2025-01-15"
+
+# Basic usage with target user supplied up front
 ./Start-M365CompromiseEvidence.ps1 -UserPrincipalName "user@contoso.com" -CaseFolder "C:\Cases\Contoso-2025-01-15"
 
 # Partner/MSP connecting to a customer tenant
@@ -71,11 +74,13 @@ Admin consent may be required for some scopes in the target tenant.
 
 | Parameter | Required | Type | Description |
 |-----------|----------|------|-------------|
-| `UserPrincipalName` | Yes | String | Email address of the compromised user |
+| `UserPrincipalName` | No | String | Email address of the compromised user; if omitted, the script prompts for it |
 | `CaseFolder` | Yes | String | Path to the case folder (parent must exist) |
 | `TenantId` | No | String | Tenant ID or domain for MSP/partner scenarios |
 | `SkipGraph` | No | Switch | Skip Entra ID / Graph evidence collection |
 | `SkipExchange` | No | Switch | Skip Exchange Online evidence collection |
+
+The account you sign in with should be your administrator/investigator account. The `UserPrincipalName` value is the compromised target account the tool examines.
 
 ## Case Folder Structure
 
