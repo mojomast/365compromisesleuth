@@ -120,6 +120,17 @@ function Read-TargetUserPrincipalName {
     }
 }
 
+function Resolve-CaseFolderPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    return [System.IO.Path]::GetFullPath($resolved)
+}
+
 # ===========================================================================
 # Main execution body - wrapped in try/finally for clean teardown
 # ===========================================================================
@@ -147,6 +158,7 @@ try {
     }
 
     $UserPrincipalName = Read-TargetUserPrincipalName -InitialValue $UserPrincipalName
+    $CaseFolder = Resolve-CaseFolderPath -Path $CaseFolder
 
     # ------------------------------------------------------------------
     # Step 4: Create case folder structure

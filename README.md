@@ -120,7 +120,8 @@ CaseFolder/
 │   ├── Indicators.csv
 │   └── CollectionLog.csv
 ├── 04-Client-Deliverables/        Incident summary report
-│   └── IncidentSummary.txt
+│   ├── IncidentSummary.txt
+│   └── IncidentSummary.html
 ├── 05-Raw/                        Raw JSON for forensic analysis
 │   ├── SignInLogs_Raw.json
 │   └── MessageTrace_Raw.json
@@ -234,6 +235,16 @@ All modules follow consistent patterns:
 - Suspicious findings call `Register-Indicator` with category, description, severity
 - Console output goes through `Write-EvidenceLog` only
 - Safe to re-run (folder creation is idempotent, file exports overwrite)
+
+## HTML Incident Report
+
+The tool also generates `04-Client-Deliverables/IncidentSummary.html` for technician review and client briefings. It includes:
+
+- Executive summary with risk level and collection counts
+- Priority findings sorted by severity
+- Recommended actions based on observed indicators and evidence gaps
+- Full indicator table with expandable detail
+- Manual review checklist, collection issues, and evidence manifest tables
 
 ## License
 

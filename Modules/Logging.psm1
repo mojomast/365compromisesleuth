@@ -140,7 +140,7 @@ function Export-EvidenceData {
         [string]$FilePath,
 
         [Parameter(Mandatory)]
-        [ValidateSet('CSV', 'JSON', 'TXT')]
+        [ValidateSet('CSV', 'JSON', 'TXT', 'HTML')]
         [string]$Format,
 
         [Parameter(Mandatory)]
@@ -169,6 +169,9 @@ function Export-EvidenceData {
             'TXT' {
                 "[No data returned for: $Description]" | Out-File -FilePath $FilePath -Encoding utf8
             }
+            'HTML' {
+                '<!DOCTYPE html><html><body><p>No data returned.</p></body></html>' | Out-File -FilePath $FilePath -Encoding utf8
+            }
         }
 
         Write-EvidenceLog "No data for: $Description (valid empty $Format file written)" -Level Warning
@@ -187,6 +190,14 @@ function Export-EvidenceData {
                 $Data | ConvertTo-Json -Depth 25 -EnumsAsStrings | Out-File -FilePath $FilePath -Encoding utf8
             }
             'TXT' {
+                if ($Data -is [string]) {
+                    $Data | Out-File -FilePath $FilePath -Encoding utf8
+                }
+                else {
+                    $Data | Out-String | Out-File -FilePath $FilePath -Encoding utf8
+                }
+            }
+            'HTML' {
                 if ($Data -is [string]) {
                     $Data | Out-File -FilePath $FilePath -Encoding utf8
                 }

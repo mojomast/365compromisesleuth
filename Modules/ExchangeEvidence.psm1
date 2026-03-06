@@ -70,7 +70,7 @@ function Get-ExchangeTargetEmailAddress {
 function Add-NormalizedRecipientKey {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
         [System.Collections.Generic.HashSet[string]]$Keys,
 
         [AllowNull()]
@@ -142,12 +142,85 @@ function Test-RecipientCollectionMatchesMailbox {
         [AllowNull()]
         $Recipients,
 
-        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
         [System.Collections.Generic.HashSet[string]]$MailboxKeys
     )
 
+    if ($null -eq $MailboxKeys -or $MailboxKeys.Count -eq 0) {
+        return $false
+    }
+
+    if ($null -eq $Recipients -or @($Recipients).Count -eq 0) {
+        return $false
+    }
+
     $recipientKeys = Get-NormalizedRecipientKeys -Value $Recipients
     return $recipientKeys.Overlaps($MailboxKeys)
+}
+
+function ConvertTo-PlainExchangeObject {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        $InputObject
+    )
+
+    if ($null -eq $InputObject) {
+        return $null
+    }
+
+    if ($InputObject -is [string] -or
+        $InputObject -is [char] -or
+        $InputObject -is [bool] -or
+        $InputObject -is [byte] -or
+        $InputObject -is [int16] -or
+        $InputObject -is [int32] -or
+        $InputObject -is [int64] -or
+        $InputObject -is [uint16] -or
+        $InputObject -is [uint32] -or
+        $InputObject -is [uint64] -or
+        $InputObject -is [single] -or
+        $InputObject -is [double] -or
+        $InputObject -is [decimal] -or
+        $InputObject -is [datetime] -or
+        $InputObject -is [datetimeoffset] -or
+        $InputObject -is [timespan] -or
+        $InputObject -is [guid] -or
+        $InputObject -is [uri]) {
+        return $InputObject
+    }
+
+    if ($InputObject.GetType().IsEnum) {
+        return $InputObject.ToString()
+    }
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        $dictionaryResult = [ordered]@{}
+        foreach ($key in $InputObject.Keys) {
+            $dictionaryResult[$key.ToString()] = ConvertTo-PlainExchangeObject -InputObject $InputObject[$key]
+        }
+        return [PSCustomObject]$dictionaryResult
+    }
+
+    if ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [string]) {
+        return @($InputObject | ForEach-Object { ConvertTo-PlainExchangeObject -InputObject $_ })
+    }
+
+    $result = [ordered]@{}
+    foreach ($property in $InputObject.PSObject.Properties) {
+        if ($property.MemberType -notin @('Property', 'NoteProperty', 'AliasProperty', 'ScriptProperty')) {
+            continue
+        }
+
+        try {
+            $result[$property.Name] = ConvertTo-PlainExchangeObject -InputObject $property.Value
+        }
+        catch {
+            $result[$property.Name] = [string]$property.Value
+        }
+    }
+
+    return [PSCustomObject]$result
 }
 
 function Resolve-DefaultCalendarFolderIdentity {
@@ -177,8 +250,12 @@ function Resolve-DefaultCalendarFolderIdentity {
         throw "Could not resolve the default calendar folder for $Mailbox."
     }
 
-    $folderPath = $defaultCalendar[0].FolderPath -replace '/', '\\'
-    return "${Mailbox}:${folderPath}"
+    if ($defaultCalendar[0].PSObject.Properties['Identity'] -and -not [string]::IsNullOrWhiteSpace([string]$defaultCalendar[0].Identity)) {
+        return [string]$defaultCalendar[0].Identity
+    }
+
+    $folderPath = ($defaultCalendar[0].FolderPath -replace '/', '\\').TrimStart('\\')
+    return "${Mailbox}:\\$folderPath"
 }
 
 function Test-IsExternalExchangeTarget {
@@ -216,21 +293,62 @@ function Get-PagedMessageTrace {
     )
 
     $pageSize = 5000
-    $page = 1
     $results = [System.Collections.Generic.List[object]]::new()
+    $traceCommand = if (Get-Command -Name 'Get-MessageTraceV2' -ErrorAction SilentlyContinue) {
+        'Get-MessageTraceV2'
+    }
+    else {
+        'Get-MessageTrace'
+    }
 
-    do {
-        $pageResults = @(Get-MessageTrace @BaseParameters -PageSize $pageSize -Page $page -ErrorAction Stop)
-        foreach ($item in $pageResults) {
-            $results.Add($item)
+    if ($traceCommand -eq 'Get-MessageTraceV2') {
+        $traceParams = @{}
+        foreach ($key in $BaseParameters.Keys) {
+            $traceParams[$key] = $BaseParameters[$key]
         }
 
-        if ($page -gt 1 -and $pageResults.Count -gt 0) {
-            Write-EvidenceLog "Collected page $page for $TraceLabel ($($pageResults.Count) rows)." -Level Info
-        }
+        $traceParams['ResultSize'] = $pageSize
+        $batchNumber = 1
+        $seenKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-        $page++
-    } while ($pageResults.Count -eq $pageSize)
+        do {
+            $pageResults = @(Get-MessageTraceV2 @traceParams -ErrorAction Stop)
+            foreach ($item in $pageResults) {
+                $dedupeKey = "{0}|{1}|{2}" -f $item.MessageTraceId, $item.RecipientAddress, $item.Received
+                if ($seenKeys.Add($dedupeKey)) {
+                    $results.Add($item)
+                }
+            }
+
+            if ($batchNumber -gt 1 -and $pageResults.Count -gt 0) {
+                Write-EvidenceLog "Collected batch $batchNumber for $TraceLabel ($($pageResults.Count) rows)." -Level Info
+            }
+
+            if ($pageResults.Count -lt $pageSize) {
+                break
+            }
+
+            $lastItem = $pageResults[-1]
+            $traceParams['EndDate'] = $lastItem.Received
+            $traceParams['StartingRecipientAddress'] = $lastItem.RecipientAddress
+            $batchNumber++
+        } while ($true)
+    }
+    else {
+        $page = 1
+        do {
+            $pageResults = @(Get-MessageTrace @BaseParameters -PageSize $pageSize -Page $page -ErrorAction Stop)
+            foreach ($item in $pageResults) {
+                $results.Add($item)
+            }
+
+            if ($page -gt 1 -and $pageResults.Count -gt 0) {
+                Write-EvidenceLog "Collected page $page for $TraceLabel ($($pageResults.Count) rows)." -Level Info
+            }
+
+            $page++
+        } while ($pageResults.Count -eq $pageSize)
+    }
 
     return @($results)
 }
@@ -255,15 +373,17 @@ function Export-ExchangeMailboxDetails {
 
     try {
         $mailbox = Get-Mailbox -Identity $UserPrincipalName -ErrorAction Stop
+        $mailboxJson = ConvertTo-PlainExchangeObject -InputObject ($mailbox | Select-Object *)
 
         $jsonPath = Join-Path $OutputFolder 'Mailbox.json'
-        Export-EvidenceData -Data $mailbox -FilePath $jsonPath -Format 'JSON' -Description 'Mailbox properties'
+        Export-EvidenceData -Data $mailboxJson -FilePath $jsonPath -Format 'JSON' -Description 'Mailbox properties'
 
         # Statistics
         try {
             $stats = Get-MailboxStatistics -Identity $UserPrincipalName -ErrorAction Stop
+            $statsJson = ConvertTo-PlainExchangeObject -InputObject ($stats | Select-Object *)
             $statsPath = Join-Path $OutputFolder 'MailboxStatistics.json'
-            Export-EvidenceData -Data $stats -FilePath $statsPath -Format 'JSON' -Description 'Mailbox statistics'
+            Export-EvidenceData -Data $statsJson -FilePath $statsPath -Format 'JSON' -Description 'Mailbox statistics'
         }
         catch {
             Write-EvidenceLog "Could not retrieve mailbox statistics (non-fatal): $($_.Exception.Message)" -Level Warning
