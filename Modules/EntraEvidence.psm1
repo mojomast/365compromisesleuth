@@ -111,8 +111,81 @@ function Export-EntraUserProfile {
     Write-EvidenceLog "Collecting Entra user profile for $UserPrincipalName..." -Level Info
 
     try {
-        $user = Get-MgUser -UserId $UserPrincipalName -Property * -ErrorAction Stop
-        $userJson = ConvertTo-PlainGraphObject -InputObject $user
+        $userProperties = @(
+            'id',
+            'displayName',
+            'givenName',
+            'surname',
+            'userPrincipalName',
+            'mail',
+            'accountEnabled',
+            'createdDateTime',
+            'lastPasswordChangeDateTime',
+            'onPremisesSyncEnabled',
+            'onPremisesImmutableId',
+            'userType',
+            'jobTitle',
+            'department',
+            'officeLocation',
+            'mobilePhone',
+            'businessPhones',
+            'proxyAddresses',
+            'otherMails',
+            'companyName',
+            'usageLocation',
+            'streetAddress',
+            'city',
+            'state',
+            'postalCode',
+            'country',
+            'employeeId',
+            'employeeType',
+            'mailNickname'
+        )
+
+        Write-EvidenceLog "Requesting selected user profile fields from Graph..." -Level Info
+        $user = Get-MgUser -UserId $UserPrincipalName -Property $userProperties -ErrorAction Stop
+        Write-EvidenceLog 'User profile retrieved; preparing exports...' -Level Info
+
+        $userJson = [PSCustomObject][ordered]@{
+            Id                         = $user.Id
+            DisplayName                = $user.DisplayName
+            GivenName                  = $user.GivenName
+            Surname                    = $user.Surname
+            UserPrincipalName          = $user.UserPrincipalName
+            Mail                       = $user.Mail
+            MailNickname               = $user.MailNickname
+            AccountEnabled             = $user.AccountEnabled
+            CreatedDateTime            = $user.CreatedDateTime
+            LastPasswordChangeDateTime = $user.LastPasswordChangeDateTime
+            OnPremisesSyncEnabled      = $user.OnPremisesSyncEnabled
+            OnPremisesImmutableId      = $user.OnPremisesImmutableId
+            UserType                   = $user.UserType
+            JobTitle                   = $user.JobTitle
+            Department                 = $user.Department
+            OfficeLocation             = $user.OfficeLocation
+            MobilePhone                = $user.MobilePhone
+            BusinessPhones             = @($user.BusinessPhones)
+            ProxyAddresses             = @($user.ProxyAddresses)
+            OtherMails                 = @($user.OtherMails)
+            CompanyName                = $user.CompanyName
+            UsageLocation              = $user.UsageLocation
+            StreetAddress              = $user.StreetAddress
+            City                       = $user.City
+            State                      = $user.State
+            PostalCode                 = $user.PostalCode
+            Country                    = $user.Country
+            EmployeeId                 = $user.EmployeeId
+            EmployeeType               = $user.EmployeeType
+        }
+
+        if ($user.PSObject.Properties['AdditionalProperties'] -and $user.AdditionalProperties) {
+            foreach ($key in $user.AdditionalProperties.Keys) {
+                if (-not $userJson.PSObject.Properties[$key]) {
+                    $userJson | Add-Member -NotePropertyName $key -NotePropertyValue (ConvertTo-PlainGraphObject -InputObject $user.AdditionalProperties[$key])
+                }
+            }
+        }
 
         # Full JSON export
         $jsonPath = Join-Path $OutputFolder 'UserProfile.json'
