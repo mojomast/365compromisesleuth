@@ -1,0 +1,730 @@
+#Requires -Version 7.0
+<#
+.SYNOPSIS
+    Exchange Online evidence collection for M365 Compromise Response.
+
+.DESCRIPTION
+    Collects mailbox details, inbox rules, permissions, forwarding
+    configuration, calendar delegates, transport rules, connectors,
+    and message trace data from Exchange Online. All operations are
+    read-only and exports go through Export-EvidenceData.
+#>
+
+# ---------------------------------------------------------------------------
+# Public functions
+# ---------------------------------------------------------------------------
+
+function Export-ExchangeMailboxDetails {
+    <#
+    .SYNOPSIS
+        Exports mailbox properties and statistics for the specified user.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$UserPrincipalName,
+
+        [Parameter(Mandatory)]
+        [string]$OutputFolder,
+
+        [string]$RawFolder
+    )
+
+    Write-EvidenceLog "Collecting mailbox details for $UserPrincipalName..." -Level Info
+
+    try {
+        $mailbox = Get-Mailbox -Identity $UserPrincipalName -ErrorAction Stop
+
+        $jsonPath = Join-Path $OutputFolder 'Mailbox.json'
+        Export-EvidenceData -Data $mailbox -FilePath $jsonPath -Format 'JSON' -Description 'Mailbox properties'
+
+        # Statistics
+        try {
+            $stats = Get-MailboxStatistics -Identity $UserPrincipalName -ErrorAction Stop
+            $statsPath = Join-Path $OutputFolder 'MailboxStatistics.json'
+            Export-EvidenceData -Data $stats -FilePath $statsPath -Format 'JSON' -Description 'Mailbox statistics'
+        }
+        catch {
+            Write-EvidenceLog "Could not retrieve mailbox statistics (non-fatal): $($_.Exception.Message)" -Level Warning
+        }
+
+        # Flattened CSV
+        $flatMailbox = [PSCustomObject]@{
+            DisplayName                = $mailbox.DisplayName
+            PrimarySmtpAddress         = $mailbox.PrimarySmtpAddress
+            MailboxType                = $mailbox.RecipientTypeDetails
+            IsMailboxEnabled           = $mailbox.IsMailboxEnabled
+            AuditEnabled               = $mailbox.AuditEnabled
+            ForwardingAddress          = $mailbox.ForwardingAddress
+            ForwardingSmtpAddress      = $mailbox.ForwardingSmtpAddress
+            DeliverToMailboxAndForward  = $mailbox.DeliverToMailboxAndForward
+            LitigationHoldEnabled      = $mailbox.LitigationHoldEnabled
+            ArchiveStatus              = $mailbox.ArchiveStatus
+            RetentionPolicy            = $mailbox.RetentionPolicy
+            WhenCreated                = $mailbox.WhenCreated
+            WhenChanged                = $mailbox.WhenChanged
+        }
+
+        $csvPath = Join-Path $OutputFolder 'Mailbox.csv'
+        Export-EvidenceData -Data @($flatMailbox) -FilePath $csvPath -Format 'CSV' -Description 'Mailbox properties (key fields)'
+
+        # Flag forwarding
+        if (-not [string]::IsNullOrWhiteSpace($mailbox.ForwardingAddress)) {
+            Register-Indicator -Category 'Forwarding' `
+                -Description "Mailbox has ForwardingAddress set: $($mailbox.ForwardingAddress)" `
+                -Severity 'High' `
+                -RawDetail "ForwardingAddress=$($mailbox.ForwardingAddress), DeliverToMailboxAndForward=$($mailbox.DeliverToMailboxAndForward)"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($mailbox.ForwardingSmtpAddress)) {
+            Register-Indicator -Category 'Forwarding' `
+                -Description "Mailbox has ForwardingSmtpAddress set: $($mailbox.ForwardingSmtpAddress)" `
+                -Severity 'High' `
+                -RawDetail "ForwardingSmtpAddress=$($mailbox.ForwardingSmtpAddress), DeliverToMailboxAndForward=$($mailbox.DeliverToMailboxAndForward)"
+        }
+    }
+    catch {
+        Register-CollectionError -FunctionName 'Export-ExchangeMailboxDetails' `
+            -ErrorMessage "Failed to collect mailbox details for $UserPrincipalName." `
+            -ErrorRecord $_
+    }
+}
+
+function Export-ExchangeInboxRules {
+    <#
+    .SYNOPSIS
+        Exports inbox rules for the specified user, including hidden rules.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$UserPrincipalName,
+
+        [Parameter(Mandatory)]
+        [string]$OutputFolder,
+
+        [string]$RawFolder
+    )
+
+    Write-EvidenceLog "Collecting inbox rules for $UserPrincipalName..." -Level Info
+
+    try {
+        $rules = @(Get-InboxRule -Mailbox $UserPrincipalName -IncludeHidden -ErrorAction Stop)
+
+        $jsonPath = Join-Path $OutputFolder 'InboxRules.json'
+        Export-EvidenceData -Data $rules -FilePath $jsonPath -Format 'JSON' -Description 'Inbox rules (including hidden)'
+
+        # Flattened CSV
+        $flatRules = @($rules | ForEach-Object {
+            [PSCustomObject]@{
+                Name                    = $_.Name
+                Enabled                 = $_.Enabled
+                Priority                = $_.Priority
+                Description             = $_.Description
+                ForwardTo               = ($_.ForwardTo -join '; ')
+                ForwardAsAttachmentTo   = ($_.ForwardAsAttachmentTo -join '; ')
+                RedirectTo              = ($_.RedirectTo -join '; ')
+                DeleteMessage           = $_.DeleteMessage
+                MoveToFolder            = $_.MoveToFolder
+                MarkAsRead              = $_.MarkAsRead
+                SubjectContainsWords    = ($_.SubjectContainsWords -join '; ')
+                FromAddressContainsWords = ($_.FromAddressContainsWords -join '; ')
+                Identity                = $_.Identity
+                RuleIdentity            = $_.RuleIdentity
+            }
+        })
+
+        $csvPath = Join-Path $OutputFolder 'InboxRules.csv'
+        Export-EvidenceData -Data $flatRules -FilePath $csvPath -Format 'CSV' -Description 'Inbox rules summary'
+
+        # Flag suspicious rules
+        foreach ($rule in $rules) {
+            # Check forwarding
+            $forwardTargets = @()
+            if ($rule.ForwardTo)             { $forwardTargets += $rule.ForwardTo }
+            if ($rule.ForwardAsAttachmentTo) { $forwardTargets += $rule.ForwardAsAttachmentTo }
+            if ($rule.RedirectTo)            { $forwardTargets += $rule.RedirectTo }
+
+            if ($forwardTargets.Count -gt 0) {
+                $externalTargets = @($forwardTargets | Where-Object {
+                    $_ -match 'smtp:' -or $_ -match '@' -and $_ -notmatch [regex]::Escape(($UserPrincipalName -split '@')[1])
+                })
+                if ($externalTargets.Count -gt 0) {
+                    Register-Indicator -Category 'SuspiciousInboxRule' `
+                        -Description "Inbox rule '$($rule.Name)' forwards/redirects to external: $($externalTargets -join ', ')" `
+                        -Severity 'High' `
+                        -RawDetail "RuleName=$($rule.Name), Targets=$($forwardTargets -join ', ')"
+                }
+            }
+
+            # Check delete
+            if ($rule.DeleteMessage -eq $true) {
+                Register-Indicator -Category 'SuspiciousInboxRule' `
+                    -Description "Inbox rule '$($rule.Name)' deletes messages." `
+                    -Severity 'High' `
+                    -RawDetail "RuleName=$($rule.Name), DeleteMessage=True"
+            }
+
+            # Check blank or suspicious names
+            if ([string]::IsNullOrWhiteSpace($rule.Name) -or $rule.Name -match '^\s+$' -or $rule.Name -match '^\.$') {
+                Register-Indicator -Category 'SuspiciousInboxRule' `
+                    -Description "Inbox rule has blank or suspicious name (may be attacker-created)." `
+                    -Severity 'High' `
+                    -RawDetail "RuleName='$($rule.Name)', RuleId=$($rule.RuleIdentity)"
+            }
+        }
+
+        Write-EvidenceLog "Collected $($rules.Count) inbox rules." -Level Info
+    }
+    catch {
+        Register-CollectionError -FunctionName 'Export-ExchangeInboxRules' `
+            -ErrorMessage "Failed to collect inbox rules for $UserPrincipalName." `
+            -ErrorRecord $_
+    }
+}
+
+function Export-ExchangeMailboxPermissions {
+    <#
+    .SYNOPSIS
+        Exports Full Access, SendAs, and SendOnBehalf permissions for the mailbox.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$UserPrincipalName,
+
+        [Parameter(Mandatory)]
+        [string]$OutputFolder,
+
+        [string]$RawFolder
+    )
+
+    Write-EvidenceLog "Collecting mailbox permissions for $UserPrincipalName..." -Level Info
+
+    # Full Access
+    try {
+        $fullAccess = @(Get-MailboxPermission -Identity $UserPrincipalName -ErrorAction Stop)
+
+        $jsonPath = Join-Path $OutputFolder 'MailboxPermissions_FullAccess.json'
+        Export-EvidenceData -Data $fullAccess -FilePath $jsonPath -Format 'JSON' -Description 'Mailbox permissions - Full Access'
+
+        $csvPath = Join-Path $OutputFolder 'MailboxPermissions_FullAccess.csv'
+        $flatFA = @($fullAccess | ForEach-Object {
+            [PSCustomObject]@{
+                Identity     = $_.Identity
+                User         = $_.User
+                AccessRights = ($_.AccessRights -join '; ')
+                IsInherited  = $_.IsInherited
+                Deny         = $_.Deny
+            }
+        })
+        Export-EvidenceData -Data $flatFA -FilePath $csvPath -Format 'CSV' -Description 'Mailbox permissions - Full Access'
+
+        # Flag non-standard
+        $nonStandard = @($fullAccess | Where-Object {
+            $_.User -notmatch 'NT AUTHORITY\\SELF' -and
+            $_.User -notmatch 'NT AUTHORITY\\SYSTEM' -and
+            $_.IsInherited -eq $false -and
+            $_.Deny -eq $false
+        })
+        foreach ($perm in $nonStandard) {
+            Register-Indicator -Category 'MailboxPermission' `
+                -Description "Non-default Full Access permission: $($perm.User) has $($perm.AccessRights -join ', ')" `
+                -Severity 'Medium' `
+                -RawDetail "User=$($perm.User), AccessRights=$($perm.AccessRights -join ', ')"
+        }
+    }
+    catch {
+        Register-CollectionError -FunctionName 'Export-ExchangeMailboxPermissions' `
+            -ErrorMessage "Failed to collect Full Access permissions for $UserPrincipalName." `
+            -ErrorRecord $_
+    }
+
+    # SendAs
+    try {
+        $sendAs = @(Get-RecipientPermission -Identity $UserPrincipalName -ErrorAction Stop)
+
+        $jsonPath = Join-Path $OutputFolder 'MailboxPermissions_SendAs.json'
+        Export-EvidenceData -Data $sendAs -FilePath $jsonPath -Format 'JSON' -Description 'Mailbox permissions - SendAs'
+
+        $csvPath = Join-Path $OutputFolder 'MailboxPermissions_SendAs.csv'
+        $flatSA = @($sendAs | ForEach-Object {
+            [PSCustomObject]@{
+                Identity     = $_.Identity
+                Trustee      = $_.Trustee
+                AccessRights = ($_.AccessRights -join '; ')
+                AccessControlType = $_.AccessControlType
+            }
+        })
+        Export-EvidenceData -Data $flatSA -FilePath $csvPath -Format 'CSV' -Description 'Mailbox permissions - SendAs'
+
+        $nonStandardSA = @($sendAs | Where-Object {
+            $_.Trustee -notmatch 'NT AUTHORITY\\SELF'
+        })
+        foreach ($perm in $nonStandardSA) {
+            Register-Indicator -Category 'MailboxPermission' `
+                -Description "Non-default SendAs permission: $($perm.Trustee)" `
+                -Severity 'Medium' `
+                -RawDetail "Trustee=$($perm.Trustee), AccessRights=$($perm.AccessRights -join ', ')"
+        }
+    }
+    catch {
+        Register-CollectionError -FunctionName 'Export-ExchangeMailboxPermissions' `
+            -ErrorMessage "Failed to collect SendAs permissions for $UserPrincipalName." `
+            -ErrorRecord $_
+    }
+
+    # SendOnBehalf
+    try {
+        $mailbox = Get-Mailbox -Identity $UserPrincipalName -ErrorAction Stop
+        $sendOnBehalf = $mailbox.GrantSendOnBehalfTo
+
+        $sobData = @($sendOnBehalf | ForEach-Object {
+            [PSCustomObject]@{
+                GrantedTo = $_
+            }
+        })
+
+        $jsonPath = Join-Path $OutputFolder 'MailboxPermissions_SendOnBehalf.json'
+        Export-EvidenceData -Data $sobData -FilePath $jsonPath -Format 'JSON' -Description 'Mailbox permissions - SendOnBehalf'
+
+        $csvPath = Join-Path $OutputFolder 'MailboxPermissions_SendOnBehalf.csv'
+        Export-EvidenceData -Data $sobData -FilePath $csvPath -Format 'CSV' -Description 'Mailbox permissions - SendOnBehalf'
+
+        if ($sendOnBehalf -and $sendOnBehalf.Count -gt 0) {
+            Register-Indicator -Category 'MailboxPermission' `
+                -Description "SendOnBehalf granted to: $($sendOnBehalf -join ', ')" `
+                -Severity 'Medium' `
+                -RawDetail "GrantSendOnBehalfTo=$($sendOnBehalf -join ', ')"
+        }
+    }
+    catch {
+        Register-CollectionError -FunctionName 'Export-ExchangeMailboxPermissions' `
+            -ErrorMessage "Failed to collect SendOnBehalf permissions for $UserPrincipalName." `
+            -ErrorRecord $_
+    }
+}
+
+function Export-ExchangeForwarding {
+    <#
+    .SYNOPSIS
+        Consolidates all forwarding configuration into a single summary.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$UserPrincipalName,
+
+        [Parameter(Mandatory)]
+        [string]$OutputFolder,
+
+        [string]$RawFolder
+    )
+
+    Write-EvidenceLog "Collecting forwarding summary for $UserPrincipalName..." -Level Info
+
+    try {
+        $forwardingItems = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+        # Check mailbox properties
+        try {
+            $mailbox = Get-Mailbox -Identity $UserPrincipalName -ErrorAction Stop
+
+            if (-not [string]::IsNullOrWhiteSpace($mailbox.ForwardingAddress)) {
+                $forwardingItems.Add([PSCustomObject]@{
+                    Source      = 'MailboxProperty'
+                    Type        = 'ForwardingAddress'
+                    Target      = $mailbox.ForwardingAddress
+                    DeliverToBoth = $mailbox.DeliverToMailboxAndForward
+                    RuleName    = $null
+                })
+            }
+            if (-not [string]::IsNullOrWhiteSpace($mailbox.ForwardingSmtpAddress)) {
+                $forwardingItems.Add([PSCustomObject]@{
+                    Source      = 'MailboxProperty'
+                    Type        = 'ForwardingSmtpAddress'
+                    Target      = $mailbox.ForwardingSmtpAddress
+                    DeliverToBoth = $mailbox.DeliverToMailboxAndForward
+                    RuleName    = $null
+                })
+            }
+        }
+        catch {
+            Write-EvidenceLog "Could not check mailbox forwarding properties (non-fatal): $($_.Exception.Message)" -Level Warning
+        }
+
+        # Check inbox rules
+        try {
+            $rules = @(Get-InboxRule -Mailbox $UserPrincipalName -IncludeHidden -ErrorAction Stop)
+
+            foreach ($rule in $rules) {
+                if ($rule.ForwardTo) {
+                    foreach ($target in $rule.ForwardTo) {
+                        $forwardingItems.Add([PSCustomObject]@{
+                            Source      = 'InboxRule'
+                            Type        = 'ForwardTo'
+                            Target      = $target
+                            DeliverToBoth = $null
+                            RuleName    = $rule.Name
+                        })
+                    }
+                }
+                if ($rule.ForwardAsAttachmentTo) {
+                    foreach ($target in $rule.ForwardAsAttachmentTo) {
+                        $forwardingItems.Add([PSCustomObject]@{
+                            Source      = 'InboxRule'
+                            Type        = 'ForwardAsAttachmentTo'
+                            Target      = $target
+                            DeliverToBoth = $null
+                            RuleName    = $rule.Name
+                        })
+                    }
+                }
+                if ($rule.RedirectTo) {
+                    foreach ($target in $rule.RedirectTo) {
+                        $forwardingItems.Add([PSCustomObject]@{
+                            Source      = 'InboxRule'
+                            Type        = 'RedirectTo'
+                            Target      = $target
+                            DeliverToBoth = $null
+                            RuleName    = $rule.Name
+                        })
+                    }
+                }
+            }
+        }
+        catch {
+            Write-EvidenceLog "Could not check inbox rules for forwarding (non-fatal): $($_.Exception.Message)" -Level Warning
+        }
+
+        $jsonPath = Join-Path $OutputFolder 'ForwardingSummary.json'
+        Export-EvidenceData -Data $forwardingItems -FilePath $jsonPath -Format 'JSON' -Description 'Forwarding summary (mailbox + inbox rules consolidated)'
+
+        # Flag external forwarding
+        if ($forwardingItems.Count -gt 0) {
+            $tenantDomain = ($UserPrincipalName -split '@')[1]
+            $externalItems = @($forwardingItems | Where-Object {
+                $_.Target -and $_.Target -notmatch [regex]::Escape($tenantDomain)
+            })
+
+            if ($externalItems.Count -gt 0) {
+                Register-Indicator -Category 'ExternalForwarding' `
+                    -Description "External forwarding detected: $($externalItems.Count) forwarding rule(s)/setting(s) point outside the tenant." `
+                    -Severity 'High' `
+                    -RawDetail (($externalItems | ForEach-Object { "$($_.Source):$($_.Type)->$($_.Target)" }) -join '; ')
+            }
+        }
+
+        Write-EvidenceLog "Forwarding summary: $($forwardingItems.Count) forwarding configuration(s) found." -Level Info
+    }
+    catch {
+        Register-CollectionError -FunctionName 'Export-ExchangeForwarding' `
+            -ErrorMessage "Failed to generate forwarding summary for $UserPrincipalName." `
+            -ErrorRecord $_
+    }
+}
+
+function Export-ExchangeCalendarDelegates {
+    <#
+    .SYNOPSIS
+        Exports calendar folder permissions for the specified user.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$UserPrincipalName,
+
+        [Parameter(Mandatory)]
+        [string]$OutputFolder,
+
+        [string]$RawFolder
+    )
+
+    Write-EvidenceLog "Collecting calendar permissions for $UserPrincipalName..." -Level Info
+
+    try {
+        $calPerms = @(Get-MailboxFolderPermission -Identity "${UserPrincipalName}:\Calendar" -ErrorAction Stop)
+
+        $jsonPath = Join-Path $OutputFolder 'CalendarPermissions.json'
+        Export-EvidenceData -Data $calPerms -FilePath $jsonPath -Format 'JSON' -Description 'Calendar folder permissions'
+
+        $flatPerms = @($calPerms | ForEach-Object {
+            [PSCustomObject]@{
+                FolderName   = $_.FolderName
+                User         = $_.User.DisplayName
+                AccessRights = ($_.AccessRights -join '; ')
+                SharingPermissionFlags = $_.SharingPermissionFlags
+            }
+        })
+
+        $csvPath = Join-Path $OutputFolder 'CalendarPermissions.csv'
+        Export-EvidenceData -Data $flatPerms -FilePath $csvPath -Format 'CSV' -Description 'Calendar folder permissions'
+
+        # Flag unusual permissions
+        $privilegedAccess = @('Editor', 'Owner', 'PublishingEditor', 'PublishingAuthor')
+        foreach ($perm in $calPerms) {
+            $userName = $perm.User.DisplayName
+            if ($userName -in @('Default', 'Anonymous')) { continue }
+
+            $rights = $perm.AccessRights | ForEach-Object { $_.ToString() }
+            $hasPrivileged = @($rights | Where-Object { $_ -in $privilegedAccess })
+
+            if ($hasPrivileged.Count -gt 0) {
+                Register-Indicator -Category 'CalendarPermission' `
+                    -Description "Calendar permission: $userName has $($hasPrivileged -join ', ') access." `
+                    -Severity 'Medium' `
+                    -RawDetail "User=$userName, AccessRights=$($rights -join ', ')"
+            }
+        }
+    }
+    catch {
+        Register-CollectionError -FunctionName 'Export-ExchangeCalendarDelegates' `
+            -ErrorMessage "Failed to collect calendar permissions for $UserPrincipalName." `
+            -ErrorRecord $_
+    }
+}
+
+function Export-ExchangeTransportRules {
+    <#
+    .SYNOPSIS
+        Exports tenant-wide transport rules (mail flow rules).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$UserPrincipalName,
+
+        [Parameter(Mandatory)]
+        [string]$OutputFolder,
+
+        [string]$RawFolder
+    )
+
+    Write-EvidenceLog "Collecting transport rules (tenant-wide)..." -Level Info
+
+    try {
+        $rules = @(Get-TransportRule -ErrorAction Stop)
+
+        $jsonPath = Join-Path $OutputFolder 'TransportRules.json'
+        Export-EvidenceData -Data $rules -FilePath $jsonPath -Format 'JSON' -Description 'Transport rules (tenant-wide mail flow rules)'
+
+        $flatRules = @($rules | ForEach-Object {
+            [PSCustomObject]@{
+                Name        = $_.Name
+                State       = $_.State
+                Priority    = $_.Priority
+                Mode        = $_.Mode
+                Description = $_.Description
+                WhenChanged = $_.WhenChanged
+                SentTo      = ($_.SentTo -join '; ')
+                SentToMemberOf = ($_.SentToMemberOf -join '; ')
+                From        = ($_.From -join '; ')
+                BlindCopyTo = ($_.BlindCopyTo -join '; ')
+                RedirectMessageTo = ($_.RedirectMessageTo -join '; ')
+                CopyTo      = ($_.CopyTo -join '; ')
+            }
+        })
+
+        $csvPath = Join-Path $OutputFolder 'TransportRules.csv'
+        Export-EvidenceData -Data $flatRules -FilePath $csvPath -Format 'CSV' -Description 'Transport rules summary'
+
+        # Flag rules that affect the compromised user
+        foreach ($rule in $rules) {
+            $affectsUser = $false
+            $reason = ''
+
+            if ($rule.SentTo -and $rule.SentTo -contains $UserPrincipalName) {
+                $affectsUser = $true; $reason = "SentTo matches"
+            }
+            if ($rule.From -and $rule.From -contains $UserPrincipalName) {
+                $affectsUser = $true; $reason = "From matches"
+            }
+
+            $hasRedirect = $rule.RedirectMessageTo -or $rule.BlindCopyTo -or $rule.CopyTo
+            if ($affectsUser -and $hasRedirect) {
+                Register-Indicator -Category 'TransportRule' `
+                    -Description "Transport rule '$($rule.Name)' redirects/BCCs mail for the compromised user ($reason)." `
+                    -Severity 'Medium' `
+                    -RawDetail "RuleName=$($rule.Name), State=$($rule.State), RedirectTo=$($rule.RedirectMessageTo -join ', '), BCC=$($rule.BlindCopyTo -join ', ')"
+            }
+        }
+
+        Write-EvidenceLog "Collected $($rules.Count) transport rules." -Level Info
+    }
+    catch {
+        Register-CollectionError -FunctionName 'Export-ExchangeTransportRules' `
+            -ErrorMessage "Failed to collect transport rules." `
+            -ErrorRecord $_
+    }
+}
+
+function Export-ExchangeConnectors {
+    <#
+    .SYNOPSIS
+        Exports inbound and outbound connectors for the tenant.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$UserPrincipalName,
+
+        [Parameter(Mandatory)]
+        [string]$OutputFolder,
+
+        [string]$RawFolder
+    )
+
+    Write-EvidenceLog "Collecting Exchange connectors (tenant-wide)..." -Level Info
+
+    # Inbound connectors
+    try {
+        $inbound = @(Get-InboundConnector -ErrorAction Stop)
+
+        $jsonPath = Join-Path $OutputFolder 'InboundConnectors.json'
+        Export-EvidenceData -Data $inbound -FilePath $jsonPath -Format 'JSON' -Description 'Inbound connectors'
+
+        # Flag recently created connectors (last 30 days)
+        $thirtyDaysAgo = (Get-Date).AddDays(-30)
+        foreach ($conn in $inbound) {
+            if ($conn.WhenCreated -and $conn.WhenCreated -gt $thirtyDaysAgo) {
+                Register-Indicator -Category 'Connector' `
+                    -Description "Recently created inbound connector: '$($conn.Name)' (created $($conn.WhenCreated))" `
+                    -Severity 'Medium' `
+                    -RawDetail "Name=$($conn.Name), Enabled=$($conn.Enabled), WhenCreated=$($conn.WhenCreated)"
+            }
+        }
+    }
+    catch {
+        Register-CollectionError -FunctionName 'Export-ExchangeConnectors' `
+            -ErrorMessage "Failed to collect inbound connectors." `
+            -ErrorRecord $_
+    }
+
+    # Outbound connectors
+    try {
+        $outbound = @(Get-OutboundConnector -ErrorAction Stop)
+
+        $jsonPath = Join-Path $OutputFolder 'OutboundConnectors.json'
+        Export-EvidenceData -Data $outbound -FilePath $jsonPath -Format 'JSON' -Description 'Outbound connectors'
+
+        $thirtyDaysAgo = (Get-Date).AddDays(-30)
+        foreach ($conn in $outbound) {
+            if ($conn.WhenCreated -and $conn.WhenCreated -gt $thirtyDaysAgo) {
+                Register-Indicator -Category 'Connector' `
+                    -Description "Recently created outbound connector: '$($conn.Name)' (created $($conn.WhenCreated))" `
+                    -Severity 'Medium' `
+                    -RawDetail "Name=$($conn.Name), Enabled=$($conn.Enabled), WhenCreated=$($conn.WhenCreated)"
+            }
+        }
+    }
+    catch {
+        Register-CollectionError -FunctionName 'Export-ExchangeConnectors' `
+            -ErrorMessage "Failed to collect outbound connectors." `
+            -ErrorRecord $_
+    }
+}
+
+function Export-ExchangeMessageTrace {
+    <#
+    .SYNOPSIS
+        Exports message trace data for sent and received messages (last 7 days).
+    .DESCRIPTION
+        Note: Exchange Online message trace only goes back 10 days via PowerShell.
+        For older data, use Start-HistoricalSearch (async, not suitable here).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$UserPrincipalName,
+
+        [Parameter(Mandatory)]
+        [string]$OutputFolder,
+
+        [string]$RawFolder
+    )
+
+    Write-EvidenceLog "Collecting message trace for $UserPrincipalName (last 7 days)..." -Level Info
+
+    $startDate = (Get-Date).AddDays(-7)
+    $endDate   = Get-Date
+
+    $sentMessages     = @()
+    $receivedMessages = @()
+
+    # Sent messages
+    try {
+        $sentMessages = @(Get-MessageTrace -SenderAddress $UserPrincipalName `
+            -StartDate $startDate -EndDate $endDate -PageSize 5000 -ErrorAction Stop)
+
+        $csvPath = Join-Path $OutputFolder 'MessageTrace_Sent.csv'
+        Export-EvidenceData -Data $sentMessages -FilePath $csvPath -Format 'CSV' -Description 'Message trace - sent messages (last 7 days)'
+
+        Write-EvidenceLog "Collected $($sentMessages.Count) sent message trace entries." -Level Info
+    }
+    catch {
+        Register-CollectionError -FunctionName 'Export-ExchangeMessageTrace' `
+            -ErrorMessage "Failed to collect sent message trace for $UserPrincipalName." `
+            -ErrorRecord $_
+    }
+
+    # Received messages
+    try {
+        $receivedMessages = @(Get-MessageTrace -RecipientAddress $UserPrincipalName `
+            -StartDate $startDate -EndDate $endDate -PageSize 5000 -ErrorAction Stop)
+
+        $csvPath = Join-Path $OutputFolder 'MessageTrace_Received.csv'
+        Export-EvidenceData -Data $receivedMessages -FilePath $csvPath -Format 'CSV' -Description 'Message trace - received messages (last 7 days)'
+
+        Write-EvidenceLog "Collected $($receivedMessages.Count) received message trace entries." -Level Info
+    }
+    catch {
+        Register-CollectionError -FunctionName 'Export-ExchangeMessageTrace' `
+            -ErrorMessage "Failed to collect received message trace for $UserPrincipalName." `
+            -ErrorRecord $_
+    }
+
+    # Combined raw JSON export
+    if ($RawFolder) {
+        $combined = @{
+            Sent     = $sentMessages
+            Received = $receivedMessages
+            Metadata = @{
+                UserPrincipalName = $UserPrincipalName
+                StartDate         = $startDate.ToString('o')
+                EndDate           = $endDate.ToString('o')
+                SentCount         = $sentMessages.Count
+                ReceivedCount     = $receivedMessages.Count
+            }
+        }
+        $rawPath = Join-Path $RawFolder 'MessageTrace_Raw.json'
+        Export-EvidenceData -Data $combined -FilePath $rawPath -Format 'JSON' -Description 'Message trace raw (sent + received, last 7 days)'
+    }
+
+    # Flag high-volume outbound
+    if ($sentMessages.Count -gt 0) {
+        $tenantDomain = ($UserPrincipalName -split '@')[1]
+        $externalRecipients = @($sentMessages |
+            Where-Object { $_.RecipientAddress -notmatch [regex]::Escape($tenantDomain) } |
+            Select-Object -ExpandProperty RecipientAddress -Unique)
+
+        if ($externalRecipients.Count -gt 100) {
+            Register-Indicator -Category 'HighVolumeOutbound' `
+                -Description "High outbound volume: $($externalRecipients.Count) unique external recipients in 7 days (threshold: 100)." `
+                -Severity 'High' `
+                -RawDetail "TotalSent=$($sentMessages.Count), UniqueExternalRecipients=$($externalRecipients.Count)"
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Module exports
+# ---------------------------------------------------------------------------
+Export-ModuleMember -Function @(
+    'Export-ExchangeMailboxDetails'
+    'Export-ExchangeInboxRules'
+    'Export-ExchangeMailboxPermissions'
+    'Export-ExchangeForwarding'
+    'Export-ExchangeCalendarDelegates'
+    'Export-ExchangeTransportRules'
+    'Export-ExchangeConnectors'
+    'Export-ExchangeMessageTrace'
+)
