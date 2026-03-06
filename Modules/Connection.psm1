@@ -184,9 +184,10 @@ function Get-ExchangeConnectionAttempts {
     }
 
     if (-not $isGuid) {
+        $organizationName = if ($resolvedDelegatedOrganization) { $resolvedDelegatedOrganization } else { $TenantId }
         $attempts.Add(@{
-            Name       = "organization '$TenantId'"
-            Parameters = @{ Organization = $TenantId }
+            Name       = "organization '$organizationName'"
+            Parameters = @{ Organization = $organizationName }
         })
     }
 
@@ -319,8 +320,9 @@ function Connect-IncidentExchange {
             $authVariants = @(Get-ExchangeAuthVariants -BaseParameters $connectParams)
             foreach ($authVariant in $authVariants) {
                 try {
+                    $authVariantParams = $authVariant.Parameters
                     Write-EvidenceLog "Exchange connection attempt using $($attempt.Name) with $($authVariant.Name)..." -Level Info
-                    Connect-ExchangeOnline @authVariant.Parameters -ErrorAction Stop
+                    Connect-ExchangeOnline @authVariantParams -ErrorAction Stop
                     Write-EvidenceLog 'Exchange Online connected successfully.' -Level Success
                     return $true
                 }
