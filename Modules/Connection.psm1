@@ -190,18 +190,54 @@ function Get-ExchangeConnectionAttempts {
         })
     }
 
-    if ($isGuid) {
-        $attempts.Add(@{
-            Name       = 'interactive default context'
-            Parameters = @{}
-        })
-    }
-
     if ($attempts.Count -eq 0) {
         throw "Unable to determine a safe Exchange connection strategy for tenant identifier '$TenantId'."
     }
 
     return $attempts
+}
+
+function Get-ExchangeAuthVariants {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$BaseParameters
+    )
+
+    $command = Get-Command -Name 'Connect-ExchangeOnline' -ErrorAction Stop
+    $supportsDisableWAM = $command.Parameters.ContainsKey('DisableWAM')
+    $supportsDevice = $command.Parameters.ContainsKey('Device')
+
+    $variants = [System.Collections.Generic.List[hashtable]]::new()
+
+    $interactiveParams = @{}
+    foreach ($key in $BaseParameters.Keys) {
+        $interactiveParams[$key] = $BaseParameters[$key]
+    }
+
+    if ($supportsDisableWAM) {
+        $interactiveParams['DisableWAM'] = $true
+    }
+
+    $variants.Add(@{
+        Name       = if ($supportsDisableWAM) { 'interactive auth (WAM disabled)' } else { 'interactive auth' }
+        Parameters = $interactiveParams
+    })
+
+    if ($supportsDevice) {
+        $deviceParams = @{}
+        foreach ($key in $interactiveParams.Keys) {
+            $deviceParams[$key] = $interactiveParams[$key]
+        }
+
+        $deviceParams['Device'] = $true
+        $variants.Add(@{
+            Name       = if ($supportsDisableWAM) { 'device code auth (WAM disabled)' } else { 'device code auth' }
+            Parameters = $deviceParams
+        })
+    }
+
+    return $variants
 }
 
 function Connect-IncidentGraph {
@@ -280,15 +316,18 @@ function Connect-IncidentExchange {
                 $connectParams[$key] = $attempt.Parameters[$key]
             }
 
-            try {
-                Write-EvidenceLog "Exchange connection attempt using $($attempt.Name)..." -Level Info
-                Connect-ExchangeOnline @connectParams -ErrorAction Stop
-                Write-EvidenceLog 'Exchange Online connected successfully.' -Level Success
-                return $true
-            }
-            catch {
-                $lastError = $_
-                Write-EvidenceLog "Exchange connection attempt failed using $($attempt.Name): $($_.Exception.Message)" -Level Warning
+            $authVariants = @(Get-ExchangeAuthVariants -BaseParameters $connectParams)
+            foreach ($authVariant in $authVariants) {
+                try {
+                    Write-EvidenceLog "Exchange connection attempt using $($attempt.Name) with $($authVariant.Name)..." -Level Info
+                    Connect-ExchangeOnline @authVariant.Parameters -ErrorAction Stop
+                    Write-EvidenceLog 'Exchange Online connected successfully.' -Level Success
+                    return $true
+                }
+                catch {
+                    $lastError = $_
+                    Write-EvidenceLog "Exchange connection attempt failed using $($attempt.Name) with $($authVariant.Name): $($_.Exception.Message)" -Level Warning
+                }
             }
         }
 
