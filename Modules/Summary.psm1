@@ -98,6 +98,298 @@ function Get-RecommendationItems {
     return @($items | Select-Object -Unique)
 }
 
+function Get-IndicatorThemeKey {
+    [CmdletBinding()]
+    param(
+        [string]$Category
+    )
+
+    switch ($Category) {
+        'Forwarding' { return 'MailboxPersistence' }
+        'ExternalForwarding' { return 'MailboxPersistence' }
+        'SuspiciousInboxRule' { return 'MailboxPersistence' }
+        'HighVolumeOutbound' { return 'MailboxPersistence' }
+        'SignInAnomaly' { return 'UnauthorizedAccess' }
+        'RiskStatus' { return 'UnauthorizedAccess' }
+        'AccountStatus' { return 'UnauthorizedAccess' }
+        'SuspiciousAppConsent' { return 'OAuthPersistence' }
+        'MailboxPermission' { return 'AccessExpansion' }
+        'CalendarPermission' { return 'AccessExpansion' }
+        'PrivilegedRole' { return 'AccessExpansion' }
+        'TransportRule' { return 'AccessExpansion' }
+        'Connector' { return 'AccessExpansion' }
+        default { return 'GeneralReview' }
+    }
+}
+
+function Get-ThemeTitle {
+    [CmdletBinding()]
+    param(
+        [string]$ThemeKey
+    )
+
+    switch ($ThemeKey) {
+        'MailboxPersistence' { return 'Mailbox Persistence or Data Exfiltration' }
+        'UnauthorizedAccess' { return 'Potential Unauthorized Access' }
+        'OAuthPersistence' { return 'OAuth or Application Persistence' }
+        'AccessExpansion' { return 'Access Expansion or Delegated Control' }
+        default { return 'Other Review Findings' }
+    }
+}
+
+function Get-IndicatorWhyItMatters {
+    [CmdletBinding()]
+    param(
+        [string]$Category
+    )
+
+    switch ($Category) {
+        'Forwarding' { return 'Mail may be automatically copied outside the intended mailbox.' }
+        'ExternalForwarding' { return 'External forwarding can indicate active data theft or persistence.' }
+        'SuspiciousInboxRule' { return 'Inbox rules can hide attacker activity, delete evidence, or exfiltrate email.' }
+        'HighVolumeOutbound' { return 'Unexpected outbound volume can indicate bulk exfiltration or spam abuse.' }
+        'SignInAnomaly' { return 'Sign-in patterns suggest account use outside normal geography or behavior.' }
+        'RiskStatus' { return 'Identity Protection has flagged activity or state associated with compromise risk.' }
+        'AccountStatus' { return 'A suspected account remains active and can still be used by an attacker.' }
+        'SuspiciousAppConsent' { return 'Delegated app consent can provide persistent access without the user password.' }
+        'MailboxPermission' { return 'Additional mailbox permissions can let other identities read or send mail.' }
+        'CalendarPermission' { return 'Calendar delegates can expose meeting data and signal broader mailbox access.' }
+        'PrivilegedRole' { return 'Privileged roles increase tenant-wide impact if the account is compromised.' }
+        'TransportRule' { return 'Mail flow rules can redirect, copy, or inspect messages outside normal controls.' }
+        'Connector' { return 'Unexpected connectors can alter trusted mail flow into or out of the tenant.' }
+        default { return 'This finding requires analyst review to determine scope and impact.' }
+    }
+}
+
+function Get-IndicatorExcerpt {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$Text,
+
+        [int]$MaxLength = 140
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return ''
+    }
+
+    $trimmed = ($Text -replace '\s+', ' ').Trim()
+    if ($trimmed.Length -le $MaxLength) {
+        return $trimmed
+    }
+
+    return $trimmed.Substring(0, $MaxLength - 3) + '...'
+}
+
+function Get-ThemeEvidenceFiles {
+    [CmdletBinding()]
+    param(
+        [string]$ThemeKey,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IEnumerable]$CollectedFiles
+    )
+
+    $pattern = switch ($ThemeKey) {
+        'MailboxPersistence' { 'InboxRules|Forwarding|Mailbox|MessageTrace' }
+        'UnauthorizedAccess' { 'UserProfile|Authentication|SignIn|Risk|Audit' }
+        'OAuthPersistence' { 'OAuth|AppRole|Consent|Application' }
+        'AccessExpansion' { 'Permission|DirectoryRoles|GroupMembership|TransportRule|Connector|Calendar' }
+        default { '.' }
+    }
+
+    return @($CollectedFiles | Where-Object {
+        $_.HasData -eq $true -and (($_.File -match $pattern) -or ($_.Description -match $pattern))
+    } | Select-Object -First 4)
+}
+
+function Get-ConfidenceAssessment {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IEnumerable]$Indicators,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IEnumerable]$CollectionErrors,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IEnumerable]$CollectedFiles
+    )
+
+    $successFiles = @($CollectedFiles | Where-Object { $_.HasData -eq $true })
+    $emptyFiles = @($CollectedFiles | Where-Object { $_.HasData -eq $false })
+    $missingSources = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($err in @($CollectionErrors)) {
+        [void]$missingSources.Add($err.Function)
+    }
+    foreach ($file in $emptyFiles) {
+        [void]$missingSources.Add($file.File)
+    }
+
+    $missingSources = @($missingSources | Select-Object -Unique)
+
+    if (@($CollectionErrors).Count -eq 0 -and $successFiles.Count -ge 8) {
+        return [PSCustomObject]@{
+            Label          = 'High'
+            Summary        = 'Core evidence sources produced data and the current assessment is supported by multiple collected artifacts.'
+            MissingSources = $missingSources
+        }
+    }
+
+    if (@($CollectionErrors).Count -le 3 -and $successFiles.Count -ge 5) {
+        return [PSCustomObject]@{
+            Label          = 'Partial'
+            Summary        = 'The report is supported by several evidence sources, but some failed or empty collections reduce confidence in the full scope.'
+            MissingSources = $missingSources
+        }
+    }
+
+    return [PSCustomObject]@{
+        Label          = 'Limited'
+        Summary        = 'Evidence gaps materially limit confidence. Manual portal review and targeted re-collection are needed before final conclusions.'
+        MissingSources = $missingSources
+    }
+}
+
+function Get-OpenQuestions {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IEnumerable]$Indicators,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IEnumerable]$CollectionErrors,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IEnumerable]$CollectedFiles
+    )
+
+    $questions = [System.Collections.Generic.List[string]]::new()
+
+    if (@($Indicators).Count -eq 0) {
+        [void]$questions.Add('No automated indicators were detected. Does manual portal review reveal suspicious activity that the scripted checks did not capture?')
+    }
+
+    foreach ($err in @($CollectionErrors | Select-Object -First 4)) {
+        [void]$questions.Add("Can the evidence gap in $($err.Function) be closed with a re-run or manual export?")
+    }
+
+    foreach ($file in @($CollectedFiles | Where-Object { $_.HasData -eq $false } | Select-Object -First 3)) {
+        [void]$questions.Add("Why did $($file.File) return no data, and is that expected for this tenant or mailbox?")
+    }
+
+    return @($questions | Select-Object -Unique)
+}
+
+function Get-PhasedRecommendations {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IEnumerable]$Indicators,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IEnumerable]$CollectionErrors
+    )
+
+    $items = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $indicatorCategories = @($Indicators | Select-Object -ExpandProperty Category -Unique)
+
+    [void]$items.Add([PSCustomObject]@{
+        Phase  = 'Contain Now'
+        Action = 'Confirm the user identity, preserve the case folder, and document who approved any containment changes because this report may become part of the incident record.'
+    })
+
+    if ($indicatorCategories -contains 'Forwarding' -or $indicatorCategories -contains 'ExternalForwarding' -or $indicatorCategories -contains 'SuspiciousInboxRule') {
+        [void]$items.Add([PSCustomObject]@{
+            Phase  = 'Contain Now'
+            Action = 'Disable malicious inbox rules and forwarding settings because the evidence suggests mailbox persistence or data exfiltration.'
+        })
+    }
+    if ($indicatorCategories -contains 'SuspiciousAppConsent') {
+        [void]$items.Add([PSCustomObject]@{
+            Phase  = 'Contain Now'
+            Action = 'Revoke suspicious OAuth grants and review enterprise applications because delegated app consent can preserve attacker access after a password reset.'
+        })
+    }
+    if ($indicatorCategories -contains 'SignInAnomaly' -or $indicatorCategories -contains 'RiskStatus' -or $indicatorCategories -contains 'AccountStatus') {
+        [void]$items.Add([PSCustomObject]@{
+            Phase  = 'Contain Now'
+            Action = 'Reset the password, revoke active sessions, and validate MFA methods because the findings suggest active or recent unauthorized sign-in activity.'
+        })
+    }
+    if ($indicatorCategories -contains 'MailboxPermission' -or $indicatorCategories -contains 'CalendarPermission' -or $indicatorCategories -contains 'PrivilegedRole') {
+        [void]$items.Add([PSCustomObject]@{
+            Phase  = 'Validate Scope'
+            Action = 'Review delegated access, mailbox permissions, and role assignments because the compromise may have expanded beyond the mailbox owner.'
+        })
+    }
+    if ($indicatorCategories -contains 'TransportRule' -or $indicatorCategories -contains 'Connector') {
+        [void]$items.Add([PSCustomObject]@{
+            Phase  = 'Validate Scope'
+            Action = 'Inspect transport rules and connectors because tenant-level mail flow changes can affect additional users or hide exfiltration paths.'
+        })
+    }
+    if (@($CollectionErrors).Count -gt 0) {
+        [void]$items.Add([PSCustomObject]@{
+            Phase  = 'Close Evidence Gaps'
+            Action = 'Re-run failed collection areas or capture portal screenshots because collection errors reduce confidence in the final scope assessment.'
+        })
+    }
+
+    [void]$items.Add([PSCustomObject]@{
+        Phase  = 'Remediate and Monitor'
+        Action = 'Remove confirmed persistence, confirm secure MFA enrollment, and monitor for recurrence because containment is incomplete until persistence is removed and activity stays clean.'
+    })
+
+    return @($items | Select-Object -Unique Phase, Action)
+}
+
+function Get-NotableTimelineItems {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IEnumerable]$Indicators,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IEnumerable]$CollectionErrors,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IEnumerable]$LogEntries
+    )
+
+    $timeline = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    foreach ($indicator in @($Indicators)) {
+        [void]$timeline.Add([PSCustomObject]@{
+            Timestamp = $indicator.Timestamp
+            Type      = 'Finding'
+            Detail    = "[$($indicator.Severity)] $($indicator.Description)"
+        })
+    }
+
+    foreach ($err in @($CollectionErrors)) {
+        [void]$timeline.Add([PSCustomObject]@{
+            Timestamp = $err.Timestamp
+            Type      = 'Gap'
+            Detail    = "$($err.Function): $($err.Message)"
+        })
+    }
+
+    foreach ($log in @($LogEntries | Where-Object {
+        $_.Level -in @('Section', 'Success', 'Warning', 'Error')
+    } | Select-Object -First 12)) {
+        [void]$timeline.Add([PSCustomObject]@{
+            Timestamp = $log.Timestamp
+            Type      = 'Collection'
+            Detail    = $log.Message
+        })
+    }
+
+    return @($timeline | Sort-Object Timestamp, Type | Select-Object -First 18)
+}
+
 function New-IncidentHtmlReport {
     [CmdletBinding()]
     param(
@@ -136,8 +428,55 @@ function New-IncidentHtmlReport {
     $sortedIndicators = @($Indicators | Sort-Object @{ Expression = { -(ConvertTo-SeverityRank -Severity $_.Severity) } }, Timestamp)
     $priorityIndicators = @($sortedIndicators | Select-Object -First 8)
     $recentLogs = @($LogEntries | Select-Object -Last 10)
-    $recommendations = @(Get-RecommendationItems -Indicators $Indicators -CollectionErrors $CollectionErrors)
+    $phasedRecommendations = @(Get-PhasedRecommendations -Indicators $Indicators -CollectionErrors $CollectionErrors)
+    $confidence = Get-ConfidenceAssessment -Indicators $Indicators -CollectionErrors $CollectionErrors -CollectedFiles $CollectedFiles
+    $openQuestions = @(Get-OpenQuestions -Indicators $Indicators -CollectionErrors $CollectionErrors -CollectedFiles $CollectedFiles)
+    $timelineItems = @(Get-NotableTimelineItems -Indicators $Indicators -CollectionErrors $CollectionErrors -LogEntries $LogEntries)
     $tenant = if ($UserPrincipalName -match '@(.+)$') { $Matches[1] } else { 'Unknown' }
+    $themeOrder = @('UnauthorizedAccess', 'MailboxPersistence', 'OAuthPersistence', 'AccessExpansion', 'GeneralReview')
+    $themeRows = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($themeKey in $themeOrder) {
+        $themeIndicators = @($sortedIndicators | Where-Object { (Get-IndicatorThemeKey -Category $_.Category) -eq $themeKey })
+        if ($themeIndicators.Count -eq 0) {
+            continue
+        }
+
+        $themeTitle = Get-ThemeTitle -ThemeKey $themeKey
+        $firstSeen = ($themeIndicators | Select-Object -First 1).Timestamp
+        $lastSeen = ($themeIndicators | Select-Object -Last 1).Timestamp
+        $themeSummary = switch ($themeKey) {
+            'UnauthorizedAccess' { "Evidence suggests the account was used or remained usable in a way that warrants unauthorized-access review, with $($themeIndicators.Count) related finding(s) between $firstSeen and $lastSeen." }
+            'MailboxPersistence' { "Mailbox rules or mail-routing findings suggest persistence or exfiltration behavior, with $($themeIndicators.Count) supporting indicator(s) between $firstSeen and $lastSeen." }
+            'OAuthPersistence' { "Application consent evidence suggests possible token-based persistence, with $($themeIndicators.Count) related indicator(s) between $firstSeen and $lastSeen." }
+            'AccessExpansion' { "Delegation, permission, or tenant mail-flow findings suggest the compromise may have expanded beyond a single mailbox, with $($themeIndicators.Count) related indicator(s) between $firstSeen and $lastSeen." }
+            default { "Additional findings require analyst review, with $($themeIndicators.Count) indicator(s) observed between $firstSeen and $lastSeen." }
+        }
+
+        $supportingFacts = ($themeIndicators | Select-Object -First 4 | ForEach-Object {
+            $detailExcerpt = Get-IndicatorExcerpt -Text $_.RawDetail
+            $fact = "<li><strong>$(ConvertTo-HtmlEncoded $_.Timestamp)</strong> - $(ConvertTo-HtmlEncoded $_.Description)"
+            if ($detailExcerpt) {
+                $fact += "<br><span class='muted-inline'>$(ConvertTo-HtmlEncoded $detailExcerpt)</span>"
+            }
+            $fact += '</li>'
+            $fact
+        }) -join "`n"
+
+        [void]$themeRows.Add(@"
+<article class="theme-card">
+  <h3>$(ConvertTo-HtmlEncoded $themeTitle)</h3>
+  <p>$(ConvertTo-HtmlEncoded $themeSummary)</p>
+  <ul class="theme-facts">
+$supportingFacts
+  </ul>
+</article>
+"@)
+    }
+
+    if ($themeRows.Count -eq 0) {
+        [void]$themeRows.Add('<article class="theme-card"><h3>No Confirmed Incident Theme</h3><p>No automated indicator group was strong enough to build a narrative theme. Manual review remains required.</p></article>')
+    }
 
     $priorityRows = if ($priorityIndicators.Count -gt 0) {
         ($priorityIndicators | ForEach-Object {
@@ -150,11 +489,11 @@ function New-IncidentHtmlReport {
 
     $indicatorRows = if (@($Indicators).Count -gt 0) {
         ($sortedIndicators | ForEach-Object {
-            "<tr><td><span class='severity-pill sev-$($_.Severity.ToLowerInvariant())'>$(ConvertTo-HtmlEncoded $_.Severity)</span></td><td>$(ConvertTo-HtmlEncoded $_.Category)</td><td>$(ConvertTo-HtmlEncoded $_.Description)</td><td><details><summary>View detail</summary><pre>$(ConvertTo-HtmlEncoded $_.RawDetail)</pre></details></td><td>$(ConvertTo-HtmlEncoded $_.Timestamp)</td></tr>"
+            "<tr><td><span class='severity-pill sev-$($_.Severity.ToLowerInvariant())'>$(ConvertTo-HtmlEncoded $_.Severity)</span></td><td>$(ConvertTo-HtmlEncoded $_.Category)</td><td>$(ConvertTo-HtmlEncoded $_.Description)</td><td>$(ConvertTo-HtmlEncoded (Get-IndicatorWhyItMatters -Category $_.Category))</td><td><details><summary>View detail</summary><pre>$(ConvertTo-HtmlEncoded $_.RawDetail)</pre></details></td><td>$(ConvertTo-HtmlEncoded $_.Timestamp)</td></tr>"
         }) -join "`n"
     }
     else {
-        "<tr><td colspan='5'>No automated indicators were detected.</td></tr>"
+        "<tr><td colspan='6'>No automated indicators were detected.</td></tr>"
     }
 
     $errorRows = if (@($CollectionErrors).Count -gt 0) {
@@ -180,19 +519,54 @@ function New-IncidentHtmlReport {
         "<li>$(ConvertTo-HtmlEncoded $_)</li>"
     }) -join "`n"
 
-    $recommendationItems = ($recommendations | ForEach-Object {
-        "<li>$(ConvertTo-HtmlEncoded $_)</li>"
+    $recommendationItems = ($phasedRecommendations | ForEach-Object {
+        "<li><strong>$(ConvertTo-HtmlEncoded $_.Phase):</strong> $(ConvertTo-HtmlEncoded $_.Action)</li>"
     }) -join "`n"
 
     $recentLogItems = ($recentLogs | ForEach-Object {
         "<li><strong>$(ConvertTo-HtmlEncoded $_.Timestamp)</strong> - $(ConvertTo-HtmlEncoded $_.Level): $(ConvertTo-HtmlEncoded $_.Message)</li>"
     }) -join "`n"
 
-    $summaryNarrative = if (@($Indicators).Count -gt 0) {
-        "Automated review identified $(@($Indicators).Count) indicator(s) for $(ConvertTo-HtmlEncoded $UserPrincipalName), with an overall risk rating of $(ConvertTo-HtmlEncoded $severityLabel). Review the priority findings and recommended actions before remediation."
+    $timelineHtml = if ($timelineItems.Count -gt 0) {
+        ($timelineItems | ForEach-Object {
+            "<li><strong>$(ConvertTo-HtmlEncoded $_.Timestamp)</strong> - <span class='timeline-type'>$(ConvertTo-HtmlEncoded $_.Type)</span>: $(ConvertTo-HtmlEncoded $_.Detail)</li>"
+        }) -join "`n"
     }
     else {
-        "Automated review completed for $(ConvertTo-HtmlEncoded $UserPrincipalName) with no direct indicators flagged by the script. Manual portal review is still required before ruling out compromise activity."
+        '<li>No notable events were available for timeline construction.</li>'
+    }
+
+    $evidenceSupportRows = foreach ($themeKey in $themeOrder) {
+        $themeIndicators = @($sortedIndicators | Where-Object { (Get-IndicatorThemeKey -Category $_.Category) -eq $themeKey })
+        if ($themeIndicators.Count -eq 0) { continue }
+        $themeFiles = @(Get-ThemeEvidenceFiles -ThemeKey $themeKey -CollectedFiles $CollectedFiles)
+        $fileText = if ($themeFiles.Count -gt 0) { (($themeFiles | Select-Object -ExpandProperty File) -join ', ') } else { 'No strong backing file match' }
+        "<tr><td>$(ConvertTo-HtmlEncoded (Get-ThemeTitle -ThemeKey $themeKey))</td><td>$($themeIndicators.Count)</td><td>$(ConvertTo-HtmlEncoded $fileText)</td></tr>"
+    }
+    $evidenceSupportHtml = if (@($evidenceSupportRows).Count -gt 0) { $evidenceSupportRows -join "`n" } else { "<tr><td colspan='3'>No themed evidence groupings were available.</td></tr>" }
+
+    $openQuestionsHtml = if ($openQuestions.Count -gt 0) {
+        ($openQuestions | ForEach-Object { "<li>$(ConvertTo-HtmlEncoded $_)</li>" }) -join "`n"
+    }
+    else {
+        '<li>No major unanswered questions were automatically identified.</li>'
+    }
+
+    $missingSourcesText = if (@($confidence.MissingSources).Count -gt 0) {
+        ($confidence.MissingSources -join ', ')
+    }
+    else {
+        'No major evidence gaps were registered by the collection engine.'
+    }
+
+    $summaryNarrative = if (@($Indicators).Count -gt 0) {
+        $topCategories = @($sortedIndicators | Select-Object -ExpandProperty Category -Unique | Select-Object -First 3)
+        $firstIndicator = ($sortedIndicators | Select-Object -First 1).Timestamp
+        $lastIndicator = ($sortedIndicators | Select-Object -Last 1).Timestamp
+        "Automated review identified $(@($Indicators).Count) indicator(s) for $(ConvertTo-HtmlEncoded $UserPrincipalName), led by $(ConvertTo-HtmlEncoded ($topCategories -join ', ')). The strongest evidence spans from $(ConvertTo-HtmlEncoded $firstIndicator) to $(ConvertTo-HtmlEncoded $lastIndicator), and the current assessment is $(ConvertTo-HtmlEncoded $severityLabel.ToLowerInvariant()) risk with $(ConvertTo-HtmlEncoded $confidence.Label.ToLowerInvariant()) confidence."
+    }
+    else {
+        "Automated review completed for $(ConvertTo-HtmlEncoded $UserPrincipalName) with no direct indicators flagged by the script. Confidence is $(ConvertTo-HtmlEncoded $confidence.Label.ToLowerInvariant()), and manual portal review is still required before ruling out compromise activity."
     }
 
     return @"
@@ -271,6 +645,12 @@ nav a {
 }
 .section-grid { grid-template-columns: 1.25fr 0.95fr; margin-top: 18px; }
 .section { margin-top: 18px; }
+.muted-inline { color: var(--muted); }
+.theme-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.theme-card { border: 1px solid var(--border); border-radius: 16px; padding: 16px; background: #fffcf7; }
+.theme-facts { margin: 0; padding-left: 18px; }
+.timeline-list { margin: 0; padding-left: 18px; }
+.timeline-type { color: var(--accent); font-weight: 700; }
 h2 { margin: 0 0 14px; font-size: 23px; }
 h3 { margin: 0 0 12px; font-size: 18px; }
 p, li { line-height: 1.55; }
@@ -340,7 +720,9 @@ ul.action-list, ul.checklist, ul.log-list { margin: 0; padding-left: 18px; }
   </section>
 
   <nav>
-    <a href="#priority-findings">Priority Findings</a>
+    <a href="#what-happened">What Happened</a>
+    <a href="#timeline">Timeline</a>
+    <a href="#evidence-support">Supporting Evidence</a>
     <a href="#recommended-actions">Recommended Actions</a>
     <a href="#indicators">Indicators</a>
     <a href="#manual-review">Manual Review</a>
@@ -349,16 +731,11 @@ ul.action-list, ul.checklist, ul.log-list { margin: 0; padding-left: 18px; }
   </nav>
 
   <div class="section-grid">
-    <section class="section" id="priority-findings">
-      <h2>Priority Findings</h2>
-      <table>
-        <thead>
-          <tr><th>Severity</th><th>Category</th><th>Finding</th><th>Detected</th></tr>
-        </thead>
-        <tbody>
-$priorityRows
-        </tbody>
-      </table>
+    <section class="section" id="what-happened">
+      <h2>What Happened</h2>
+      <div class="theme-grid">
+$($themeRows -join "`n")
+      </div>
     </section>
 
     <section class="section" id="recommended-actions">
@@ -372,11 +749,56 @@ $recommendationItems
     </section>
   </div>
 
+  <div class="section-grid">
+    <section class="section" id="timeline">
+      <h2>Timeline of Notable Activity</h2>
+      <ul class="timeline-list">
+$timelineHtml
+      </ul>
+    </section>
+
+    <section class="section" id="evidence-support">
+      <h2>Evidence That Supports This Assessment</h2>
+      <table>
+        <thead>
+          <tr><th>Theme</th><th>Indicators</th><th>Supporting Files</th></tr>
+        </thead>
+        <tbody>
+$evidenceSupportHtml
+        </tbody>
+      </table>
+      <div class="callout" style="margin-top:14px;">
+        <strong>Coverage / Confidence: $(ConvertTo-HtmlEncoded $confidence.Label)</strong><br>
+        $(ConvertTo-HtmlEncoded $confidence.Summary)<br>
+        <strong>Known gaps:</strong> $(ConvertTo-HtmlEncoded $missingSourcesText)
+      </div>
+    </section>
+  </div>
+
+  <section class="section">
+    <h2>Open Questions</h2>
+    <ul class="action-list">
+$openQuestionsHtml
+    </ul>
+  </section>
+
+  <section class="section">
+    <h2>Priority Findings</h2>
+    <table>
+      <thead>
+        <tr><th>Severity</th><th>Category</th><th>Finding</th><th>Detected</th></tr>
+      </thead>
+      <tbody>
+$priorityRows
+      </tbody>
+    </table>
+  </section>
+
   <section class="section" id="indicators">
     <h2>All Indicators</h2>
     <table>
       <thead>
-        <tr><th>Severity</th><th>Category</th><th>Description</th><th>Detail</th><th>Timestamp</th></tr>
+        <tr><th>Severity</th><th>Category</th><th>Description</th><th>Why It Matters</th><th>Detail</th><th>Timestamp</th></tr>
       </thead>
       <tbody>
 $indicatorRows
@@ -470,6 +892,7 @@ function New-IncidentSummary {
         $collectionErrors = Get-CollectionErrors
         $indicators       = Get-Indicators
         $logEntries       = Get-LogEntries
+        $reportCollectedFiles = @($collectedFiles)
 
         # ---------------------------------------------------------------
         # Build the IncidentSummary.txt content
@@ -634,7 +1057,7 @@ function New-IncidentSummary {
             -CaseFolder $CaseFolder `
             -UserPrincipalName $UserPrincipalName `
             -CasePaths $CasePaths `
-            -CollectedFiles $collectedFiles `
+            -CollectedFiles $reportCollectedFiles `
             -CollectionErrors $collectionErrors `
             -Indicators $indicators `
             -LogEntries $logEntries
