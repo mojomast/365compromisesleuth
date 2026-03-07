@@ -373,41 +373,57 @@ function Export-ExchangeMailboxDetails {
 
     try {
         $mailbox = Get-Mailbox -Identity $UserPrincipalName -ErrorAction Stop
-        $mailboxJson = ConvertTo-PlainExchangeObject -InputObject ($mailbox | Select-Object *)
+        $mailboxExport = [PSCustomObject]@{
+            UserPrincipalName          = $mailbox.UserPrincipalName
+            DisplayName                = $mailbox.DisplayName
+            PrimarySmtpAddress         = [string]$mailbox.PrimarySmtpAddress
+            Alias                      = $mailbox.Alias
+            RecipientTypeDetails       = [string]$mailbox.RecipientTypeDetails
+            ExchangeGuid               = [string]$mailbox.ExchangeGuid
+            ExternalDirectoryObjectId  = $mailbox.ExternalDirectoryObjectId
+            IsMailboxEnabled           = $mailbox.IsMailboxEnabled
+            AuditEnabled               = $mailbox.AuditEnabled
+            DefaultAuditSet            = (@($mailbox.DefaultAuditSet) | ForEach-Object { $_.ToString() }) -join '; '
+            ForwardingAddress          = [string]$mailbox.ForwardingAddress
+            ForwardingSmtpAddress      = [string]$mailbox.ForwardingSmtpAddress
+            DeliverToMailboxAndForward = $mailbox.DeliverToMailboxAndForward
+            LitigationHoldEnabled      = $mailbox.LitigationHoldEnabled
+            InPlaceHolds               = (@($mailbox.InPlaceHolds) | ForEach-Object { $_.ToString() }) -join '; '
+            RetentionPolicy            = [string]$mailbox.RetentionPolicy
+            RetentionHoldEnabled       = $mailbox.RetentionHoldEnabled
+            ArchiveStatus              = [string]$mailbox.ArchiveStatus
+            WhenCreated                = $mailbox.WhenCreated
+            WhenChanged                = $mailbox.WhenChanged
+        }
 
         $jsonPath = Join-Path $OutputFolder 'Mailbox.json'
-        Export-EvidenceData -Data $mailboxJson -FilePath $jsonPath -Format 'JSON' -Description 'Mailbox properties'
+        Export-EvidenceData -Data $mailboxExport -FilePath $jsonPath -Format 'JSON' -Description 'Mailbox properties'
 
         # Statistics
         try {
             $stats = Get-MailboxStatistics -Identity $UserPrincipalName -ErrorAction Stop
-            $statsJson = ConvertTo-PlainExchangeObject -InputObject ($stats | Select-Object *)
+            $statsExport = [PSCustomObject]@{
+                DisplayName            = $stats.DisplayName
+                MailboxGuid            = [string]$stats.MailboxGuid
+                ItemCount              = $stats.ItemCount
+                DeletedItemCount       = $stats.DeletedItemCount
+                TotalItemSize          = [string]$stats.TotalItemSize
+                TotalDeletedItemSize   = [string]$stats.TotalDeletedItemSize
+                StorageLimitStatus     = [string]$stats.StorageLimitStatus
+                LastLogonTime          = $stats.LastLogonTime
+                LastLogoffTime         = $stats.LastLogoffTime
+                LastLoggedOnUserAccount = $stats.LastLoggedOnUserAccount
+            }
             $statsPath = Join-Path $OutputFolder 'MailboxStatistics.json'
-            Export-EvidenceData -Data $statsJson -FilePath $statsPath -Format 'JSON' -Description 'Mailbox statistics'
+            Export-EvidenceData -Data $statsExport -FilePath $statsPath -Format 'JSON' -Description 'Mailbox statistics'
         }
         catch {
             Write-EvidenceLog "Could not retrieve mailbox statistics (non-fatal): $($_.Exception.Message)" -Level Warning
         }
 
         # Flattened CSV
-        $flatMailbox = [PSCustomObject]@{
-            DisplayName                = $mailbox.DisplayName
-            PrimarySmtpAddress         = $mailbox.PrimarySmtpAddress
-            MailboxType                = $mailbox.RecipientTypeDetails
-            IsMailboxEnabled           = $mailbox.IsMailboxEnabled
-            AuditEnabled               = $mailbox.AuditEnabled
-            ForwardingAddress          = $mailbox.ForwardingAddress
-            ForwardingSmtpAddress      = $mailbox.ForwardingSmtpAddress
-            DeliverToMailboxAndForward  = $mailbox.DeliverToMailboxAndForward
-            LitigationHoldEnabled      = $mailbox.LitigationHoldEnabled
-            ArchiveStatus              = $mailbox.ArchiveStatus
-            RetentionPolicy            = $mailbox.RetentionPolicy
-            WhenCreated                = $mailbox.WhenCreated
-            WhenChanged                = $mailbox.WhenChanged
-        }
-
         $csvPath = Join-Path $OutputFolder 'Mailbox.csv'
-        Export-EvidenceData -Data @($flatMailbox) -FilePath $csvPath -Format 'CSV' -Description 'Mailbox properties (key fields)'
+        Export-EvidenceData -Data @($mailboxExport) -FilePath $csvPath -Format 'CSV' -Description 'Mailbox properties (key fields)'
 
         # Flag forwarding
         if (-not [string]::IsNullOrWhiteSpace($mailbox.ForwardingAddress)) {
