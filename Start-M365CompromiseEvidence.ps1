@@ -96,6 +96,7 @@ Import-Module (Join-Path $modulesPath 'Prerequisites.psm1') -Force
 Import-Module (Join-Path $modulesPath 'CaseFolder.psm1') -Force
 Import-Module (Join-Path $modulesPath 'EntraEvidence.psm1') -Force
 Import-Module (Join-Path $modulesPath 'Summary.psm1') -Force
+Import-Module (Join-Path $modulesPath 'SignInAnalysis.psm1') -Force
 
 # Connection and ExchangeEvidence are dot-sourced (NOT imported as modules)
 # because EXO V3 REST cmdlets check the *calling module's* session state for
@@ -274,13 +275,25 @@ try {
     }
 
     # ------------------------------------------------------------------
-    # Step 10: Generate incident summary and manifests
+    # Step 10: Post-collection compromise analysis
     # ------------------------------------------------------------------
-    Write-EvidenceLog '--- Generating incident summary ---' -Level Section
-    New-IncidentSummary -CaseFolder $CaseFolder -UserPrincipalName $UserPrincipalName -CasePaths $casePaths
+    Write-EvidenceLog '--- Running post-collection compromise analysis ---' -Level Section
+    $analysisResult = $null
+    try {
+        $analysisResult = Invoke-CompromiseAnalysis -CasePaths $casePaths -UserPrincipalName $UserPrincipalName
+    }
+    catch {
+        Write-EvidenceLog "Post-collection analysis failed (non-fatal): $($_.Exception.Message)" -Level Warning
+    }
 
     # ------------------------------------------------------------------
-    # Step 11: Final status report
+    # Step 11: Generate incident summary and manifests
+    # ------------------------------------------------------------------
+    Write-EvidenceLog '--- Generating incident summary ---' -Level Section
+    New-IncidentSummary -CaseFolder $CaseFolder -UserPrincipalName $UserPrincipalName -CasePaths $casePaths -AnalysisResult $analysisResult
+
+    # ------------------------------------------------------------------
+    # Step 12: Final status report
     # ------------------------------------------------------------------
     $collectedFiles  = Get-CollectedFiles
     $collectionErrors = Get-CollectionErrors

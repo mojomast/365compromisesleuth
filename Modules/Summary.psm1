@@ -412,7 +412,10 @@ function New-IncidentHtmlReport {
         [System.Collections.IEnumerable]$Indicators,
 
         [Parameter(Mandatory)]
-        [System.Collections.IEnumerable]$LogEntries
+        [System.Collections.IEnumerable]$LogEntries,
+
+        [AllowNull()]
+        [PSCustomObject]$AnalysisResult = $null
     )
 
     $severityLabel = 'Low'
@@ -569,6 +572,183 @@ $supportingFacts
         "Automated review completed for $(ConvertTo-HtmlEncoded $UserPrincipalName) with no direct indicators flagged by the script. Confidence is $(ConvertTo-HtmlEncoded $confidence.Label.ToLowerInvariant()), and manual portal review is still required before ruling out compromise activity."
     }
 
+    # -------------------------------------------------------------------
+    # Build analysis sections HTML (if AnalysisResult is available)
+    # -------------------------------------------------------------------
+    $signInSummaryHtml   = ''
+    $ipLocationTableHtml = ''
+    $compromiseWindowHtml = ''
+    $auditCorrelationHtml = ''
+
+    if ($null -ne $AnalysisResult) {
+        # -- Sign-In Analysis summary card --
+        $sis = $AnalysisResult.SignInSummary
+        if ($null -ne $sis) {
+            $signInSummaryHtml = @"
+  <section class="section" id="signin-analysis">
+    <h2>Sign-In Analysis</h2>
+    <div class="stats" style="grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));">
+      <div class="stat"><div class="label">Total Sign-Ins</div><div class="stat-value">$(ConvertTo-HtmlEncoded $sis.TotalSignIns)</div></div>
+      <div class="stat"><div class="label">Unique IPs</div><div class="stat-value">$(ConvertTo-HtmlEncoded $sis.UniqueIPs)</div></div>
+      <div class="stat"><div class="label">Countries</div><div class="stat-value">$(ConvertTo-HtmlEncoded $sis.UniqueCountries)</div></div>
+      <div class="stat"><div class="label">Unique Apps</div><div class="stat-value">$(ConvertTo-HtmlEncoded $sis.UniqueApps)</div></div>
+      <div class="stat"><div class="label">Successful</div><div class="stat-value" style="color:var(--ok);">$(ConvertTo-HtmlEncoded $sis.SuccessCount)</div></div>
+      <div class="stat"><div class="label">Failed</div><div class="stat-value" style="color:var(--high);">$(ConvertTo-HtmlEncoded $sis.FailureCount)</div></div>
+      <div class="stat"><div class="label">Interactive</div><div class="stat-value">$(ConvertTo-HtmlEncoded $sis.InteractiveCount)</div></div>
+      <div class="stat"><div class="label">Non-Interactive</div><div class="stat-value">$(ConvertTo-HtmlEncoded $sis.NonInteractiveCount)</div></div>
+    </div>
+    <p style="margin-top:12px;color:var(--muted);">Window: $(ConvertTo-HtmlEncoded $sis.FirstSeen) to $(ConvertTo-HtmlEncoded $sis.LastSeen) | Countries: $(ConvertTo-HtmlEncoded $sis.CountryList)</p>
+"@
+            # Anomalous sign-ins sub-section
+            $anomalies = @($AnalysisResult.AnomalousSignIns)
+            if ($anomalies.Count -gt 0) {
+                $anomRows = ($anomalies | Select-Object -First 15 | ForEach-Object {
+                    $typeClass = switch ($_.Type) {
+                        'ImpossibleTravel' { 'sev-high' }
+                        'NewIP'            { 'sev-medium' }
+                        'NewApp'           { 'sev-low' }
+                        default            { '' }
+                    }
+                    "<tr><td><span class='severity-pill $typeClass'>$(ConvertTo-HtmlEncoded $_.Type)</span></td><td>$(ConvertTo-HtmlEncoded $_.Detail)</td><td>$(ConvertTo-HtmlEncoded $_.FirstSignIn)</td><td>$(ConvertTo-HtmlEncoded $_.FirstIP)</td></tr>"
+                }) -join "`n"
+                $signInSummaryHtml += @"
+
+    <h3 style="margin-top:18px;">Anomalous Sign-In Events</h3>
+    <table>
+      <thead><tr><th>Type</th><th>Detail</th><th>First Seen</th><th>IP</th></tr></thead>
+      <tbody>
+$anomRows
+      </tbody>
+    </table>
+"@
+            }
+
+            # Failed auth patterns sub-section
+            $failPatterns = @($AnalysisResult.FailedAuthPatterns)
+            if ($failPatterns.Count -gt 0) {
+                $failRows = ($failPatterns | Select-Object -First 15 | ForEach-Object {
+                    $patClass = switch ($_.Pattern) {
+                        'PasswordSpray' { 'sev-high' }
+                        'BruteForce'    { 'sev-high' }
+                        default         { 'sev-low' }
+                    }
+                    "<tr><td><span class='severity-pill $patClass'>$(ConvertTo-HtmlEncoded $_.Pattern)</span></td><td>$(ConvertTo-HtmlEncoded $_.IPAddress)</td><td>$(ConvertTo-HtmlEncoded $_.FailCount) / $(ConvertTo-HtmlEncoded $_.TotalAttempts)</td><td>$(ConvertTo-HtmlEncoded $_.FailRate)</td><td>$(ConvertTo-HtmlEncoded $_.UniqueErrors)</td><td>$(ConvertTo-HtmlEncoded $_.FirstAttempt)</td><td>$(ConvertTo-HtmlEncoded $_.LastAttempt)</td></tr>"
+                }) -join "`n"
+                $signInSummaryHtml += @"
+
+    <h3 style="margin-top:18px;">Failed Authentication Patterns</h3>
+    <table>
+      <thead><tr><th>Pattern</th><th>IP Address</th><th>Fail / Total</th><th>Fail Rate</th><th>Error Codes</th><th>First</th><th>Last</th></tr></thead>
+      <tbody>
+$failRows
+      </tbody>
+    </table>
+"@
+            }
+
+            $signInSummaryHtml += "`n  </section>"
+        }
+
+        # -- IP / Location table --
+        $ipData  = @($AnalysisResult.IPAnalysis)
+        $locData = @($AnalysisResult.LocationAnalysis)
+        if ($ipData.Count -gt 0 -or $locData.Count -gt 0) {
+            $ipLocationTableHtml = @"
+  <section class="section" id="ip-location">
+    <h2>IP Addresses &amp; Locations</h2>
+"@
+            if ($ipData.Count -gt 0) {
+                $ipRows = ($ipData | Select-Object -First 25 | ForEach-Object {
+                    "<tr><td>$(ConvertTo-HtmlEncoded $_.IPAddress)</td><td>$(ConvertTo-HtmlEncoded $_.Count)</td><td style='color:var(--ok);'>$(ConvertTo-HtmlEncoded $_.SuccessCount)</td><td style='color:var(--high);'>$(ConvertTo-HtmlEncoded $_.FailCount)</td><td>$(ConvertTo-HtmlEncoded $_.Countries)</td><td>$(ConvertTo-HtmlEncoded $_.Apps)</td><td>$(ConvertTo-HtmlEncoded $_.FirstSeen)</td><td>$(ConvertTo-HtmlEncoded $_.LastSeen)</td></tr>"
+                }) -join "`n"
+                $ipLocationTableHtml += @"
+
+    <h3>IP Address Activity</h3>
+    <table>
+      <thead><tr><th>IP Address</th><th>Count</th><th>Success</th><th>Fail</th><th>Countries</th><th>Apps</th><th>First Seen</th><th>Last Seen</th></tr></thead>
+      <tbody>
+$ipRows
+      </tbody>
+    </table>
+"@
+            }
+            if ($locData.Count -gt 0) {
+                $locRows = ($locData | Select-Object -First 20 | ForEach-Object {
+                    "<tr><td>$(ConvertTo-HtmlEncoded $_.Country)</td><td>$(ConvertTo-HtmlEncoded $_.City)</td><td>$(ConvertTo-HtmlEncoded $_.Count)</td><td>$(ConvertTo-HtmlEncoded $_.UniqueIPs)</td><td>$(ConvertTo-HtmlEncoded $_.FirstSeen)</td><td>$(ConvertTo-HtmlEncoded $_.LastSeen)</td></tr>"
+                }) -join "`n"
+                $ipLocationTableHtml += @"
+
+    <h3 style="margin-top:18px;">Location Summary</h3>
+    <table>
+      <thead><tr><th>Country</th><th>City</th><th>Sign-Ins</th><th>Unique IPs</th><th>First Seen</th><th>Last Seen</th></tr></thead>
+      <tbody>
+$locRows
+      </tbody>
+    </table>
+"@
+            }
+            $ipLocationTableHtml += "`n  </section>"
+        }
+
+        # -- Compromise Window --
+        $cw = $AnalysisResult.CompromiseWindow
+        if ($null -ne $cw) {
+            $keyEventsHtml = if ($cw.KeyEvents -and @($cw.KeyEvents).Count -gt 0) {
+                ($cw.KeyEvents | ForEach-Object { "<li>$(ConvertTo-HtmlEncoded $_)</li>" }) -join "`n"
+            } else { '<li>No key events identified.</li>' }
+
+            $cwConfClass = switch ($cw.Confidence) {
+                'High'   { 'sev-high' }
+                'Medium' { 'sev-medium' }
+                default  { 'sev-low' }
+            }
+
+            $compromiseWindowHtml = @"
+  <section class="section" id="compromise-window">
+    <h2>Estimated Compromise Window</h2>
+    <div class="callout">
+      <strong>Window:</strong> $(ConvertTo-HtmlEncoded $cw.WindowStart) to $(ConvertTo-HtmlEncoded $cw.WindowEnd)
+      (<strong>$(ConvertTo-HtmlEncoded $cw.DurationDescription)</strong>)
+      &mdash; Confidence: <span class="severity-pill $cwConfClass">$(ConvertTo-HtmlEncoded $cw.Confidence)</span>
+      &mdash; $(ConvertTo-HtmlEncoded $cw.TotalSignals) corroborating signal(s)
+    </div>
+    <h3 style="margin-top:14px;">Key Bounding Events</h3>
+    <ul class="action-list">
+$keyEventsHtml
+    </ul>
+  </section>
+"@
+        }
+
+        # -- Audit Correlation --
+        $auditEvents = @($AnalysisResult.AuditTimeline)
+        if ($auditEvents.Count -gt 0) {
+            $auditRows = ($auditEvents | Select-Object -First 30 | ForEach-Object {
+                $etClass = switch ($_.EventType) {
+                    'PasswordChange' { 'sev-medium' }
+                    'MFAChange'      { 'sev-high' }
+                    'RoleChange'     { 'sev-high' }
+                    'AppConsent'     { 'sev-high' }
+                    default          { 'sev-low' }
+                }
+                "<tr><td>$(ConvertTo-HtmlEncoded $_.Timestamp)</td><td><span class='severity-pill $etClass'>$(ConvertTo-HtmlEncoded $_.EventType)</span></td><td>$(ConvertTo-HtmlEncoded $_.Activity)</td><td>$(ConvertTo-HtmlEncoded $_.InitiatedBy)</td><td>$(ConvertTo-HtmlEncoded $_.Target)</td><td>$(ConvertTo-HtmlEncoded $_.Result)</td></tr>"
+            }) -join "`n"
+
+            $auditCorrelationHtml = @"
+  <section class="section" id="audit-correlation">
+    <h2>Audit Event Correlation</h2>
+    <p style="color:var(--muted);">High-value directory changes detected during the investigation window: password resets, MFA modifications, role changes, and application consents.</p>
+    <table>
+      <thead><tr><th>Timestamp</th><th>Event Type</th><th>Activity</th><th>Initiated By</th><th>Target</th><th>Result</th></tr></thead>
+      <tbody>
+$auditRows
+      </tbody>
+    </table>
+  </section>
+"@
+        }
+    }
+
     return @"
 <!DOCTYPE html>
 <html lang="en">
@@ -722,6 +902,10 @@ ul.action-list, ul.checklist, ul.log-list { margin: 0; padding-left: 18px; }
   <nav>
     <a href="#what-happened">What Happened</a>
     <a href="#timeline">Timeline</a>
+    <a href="#signin-analysis">Sign-In Analysis</a>
+    <a href="#ip-location">IPs &amp; Locations</a>
+    <a href="#compromise-window">Compromise Window</a>
+    <a href="#audit-correlation">Audit Correlation</a>
     <a href="#evidence-support">Supporting Evidence</a>
     <a href="#recommended-actions">Recommended Actions</a>
     <a href="#indicators">Indicators</a>
@@ -774,6 +958,14 @@ $evidenceSupportHtml
       </div>
     </section>
   </div>
+
+$signInSummaryHtml
+
+$ipLocationTableHtml
+
+$compromiseWindowHtml
+
+$auditCorrelationHtml
 
   <section class="section">
     <h2>Open Questions</h2>
@@ -879,7 +1071,10 @@ function New-IncidentSummary {
         [string]$UserPrincipalName,
 
         [Parameter(Mandatory)]
-        [PSCustomObject]$CasePaths
+        [PSCustomObject]$CasePaths,
+
+        [AllowNull()]
+        [PSCustomObject]$AnalysisResult = $null
     )
 
     Write-EvidenceLog '--- Generating incident summary ---' -Level Section
@@ -1060,7 +1255,8 @@ function New-IncidentSummary {
             -CollectedFiles @($reportCollectedFiles) `
             -CollectionErrors @($collectionErrors) `
             -Indicators @($indicators) `
-            -LogEntries @($logEntries)
+            -LogEntries @($logEntries) `
+            -AnalysisResult $AnalysisResult
 
         Export-EvidenceData -Data $htmlReport `
             -FilePath $htmlSummaryPath `
