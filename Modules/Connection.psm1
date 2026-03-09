@@ -308,6 +308,15 @@ function Connect-IncidentExchange {
     Write-EvidenceLog 'Connecting to Exchange Online...' -Level Info
 
     try {
+        # EXO V3 REST cmdlets store their connection context in the
+        # ExchangeOnlineManagement module's internal state. If that module
+        # was imported into Connection.psm1's private scope (via the
+        # Prerequisites check or implicit load), the context is invisible
+        # to other modules like ExchangeEvidence.psm1. Promoting the
+        # module to global scope BEFORE connecting ensures the context
+        # is shared across all callers in the session.
+        Import-Module ExchangeOnlineManagement -Global -DisableNameChecking -Force -ErrorAction SilentlyContinue
+
         $connectAttempts = @(Get-ExchangeConnectionAttempts -TenantId $TenantId)
         $lastError = $null
 
