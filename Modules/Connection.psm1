@@ -322,17 +322,31 @@ function Connect-IncidentExchange {
                 try {
                     $authVariantParams = $authVariant.Parameters
                     Write-EvidenceLog "Exchange connection attempt using $($attempt.Name) with $($authVariant.Name)..." -Level Info
-                    Connect-ExchangeOnline @authVariantParams -ErrorAction Stop
+
+                    # EXO V3 REST cmdlets look up the connection context in the
+                    # *calling module's* session state.  If we call Connect-ExchangeOnline
+                    # from Connection.psm1's scope, the context is stored here and
+                    # is invisible to ExchangeEvidence.psm1.  By invoking the
+                    # connection inside EXO's own module scope, the context lives
+                    # where every EXO cmdlet expects to find it.
+                    $exoMod = Get-Module ExchangeOnlineManagement
+                    if ($exoMod) {
+                        & $exoMod { Connect-ExchangeOnline @args -ErrorAction Stop } @authVariantParams
+                    }
+                    else {
+                        # Fallback: call directly (works when EXO is global)
+                        Connect-ExchangeOnline @authVariantParams -ErrorAction Stop
+                    }
 
                     # Re-import the EXO session module into global scope so that
                     # cmdlets (Get-MailboxPermission, Get-TransportRule, etc.) are
                     # visible to other .psm1 modules loaded in the same session.
-                    $exoModule = Get-Module -Name 'tmp*' | Where-Object {
+                    $exoSession = Get-Module -Name 'tmp*' | Where-Object {
                         $_.ExportedCommands.ContainsKey('Get-Mailbox')
                     } | Select-Object -First 1
-                    if ($exoModule) {
-                        Import-Module $exoModule -Global -DisableNameChecking -Force
-                        Write-EvidenceLog "Exchange session module '$($exoModule.Name)' promoted to global scope." -Level Info
+                    if ($exoSession) {
+                        Import-Module $exoSession -Global -DisableNameChecking -Force
+                        Write-EvidenceLog "Exchange session module '$($exoSession.Name)' promoted to global scope." -Level Info
                     }
 
                     Write-EvidenceLog 'Exchange Online connected successfully.' -Level Success
