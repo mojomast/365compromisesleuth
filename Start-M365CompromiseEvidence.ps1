@@ -81,6 +81,16 @@ $script:UpnPattern  = '^[^@]+@[^@]+\.[^@]+$'
 # ===========================================================================
 $modulesPath = Join-Path $PSScriptRoot 'Modules'
 
+# ExchangeOnlineManagement must be loaded into global scope BEFORE any of our
+# modules are imported.  EXO V3 REST cmdlets (Get-Mailbox, Get-InboxRule, etc.)
+# store their connection context inside the EXO module's internal state.  If
+# each .psm1 gets its own private copy of the module, the context created by
+# Connection.psm1 is invisible to ExchangeEvidence.psm1.  Loading once here
+# into global scope guarantees a single shared instance for the whole session.
+if (-not $SkipExchange) {
+    Import-Module ExchangeOnlineManagement -Global -DisableNameChecking -ErrorAction SilentlyContinue
+}
+
 Import-Module (Join-Path $modulesPath 'Logging.psm1') -Force
 Import-Module (Join-Path $modulesPath 'Prerequisites.psm1') -Force
 Import-Module (Join-Path $modulesPath 'CaseFolder.psm1') -Force
