@@ -372,9 +372,8 @@ function Export-ExchangeMailboxDetails {
     Write-EvidenceLog "Collecting mailbox details for $UserPrincipalName..." -Level Info
 
     try {
-        $mailbox = Get-Mailbox -Identity $UserPrincipalName -ErrorAction Stop
+        $mailbox = Get-EXOMailbox -Identity $UserPrincipalName -PropertySets Delivery,Audit,Hold,Retention -Properties IsMailboxEnabled,RecipientTypeDetails,ExchangeGuid,ExternalDirectoryObjectId,WhenCreated,WhenChanged,ArchiveStatus,InPlaceHolds -ErrorAction Stop
         $mailboxExport = [PSCustomObject]@{
-            UserPrincipalName          = $mailbox.UserPrincipalName
             DisplayName                = $mailbox.DisplayName
             PrimarySmtpAddress         = [string]$mailbox.PrimarySmtpAddress
             Alias                      = $mailbox.Alias
@@ -401,7 +400,7 @@ function Export-ExchangeMailboxDetails {
 
         # Statistics
         try {
-            $stats = Get-MailboxStatistics -Identity $UserPrincipalName -ErrorAction Stop
+            $stats = Get-EXOMailboxStatistics -Identity $UserPrincipalName -ErrorAction Stop
             $statsExport = [PSCustomObject]@{
                 DisplayName            = $stats.DisplayName
                 MailboxGuid            = [string]$stats.MailboxGuid
@@ -466,7 +465,7 @@ function Export-ExchangeInboxRules {
 
     try {
         $fallbackDomain = ($UserPrincipalName -split '@')[1]
-        $rules = @(Get-InboxRule -Identity $UserPrincipalName -IncludeHidden -ErrorAction Stop)
+        $rules = @(Get-InboxRule -Identity $UserPrincipalName -ErrorAction Stop)
 
         $jsonPath = Join-Path $OutputFolder 'InboxRules.json'
         Export-EvidenceData -Data $rules -FilePath $jsonPath -Format 'JSON' -Description 'Inbox rules (including hidden)'
@@ -560,7 +559,7 @@ function Export-ExchangeMailboxPermissions {
 
     # Full Access
     try {
-        $fullAccess = @(Get-MailboxPermission -Identity $UserPrincipalName -ErrorAction Stop)
+        $fullAccess = @(Get-EXOMailboxPermission -Identity $UserPrincipalName -ErrorAction Stop)
 
         $jsonPath = Join-Path $OutputFolder 'MailboxPermissions_FullAccess.json'
         Export-EvidenceData -Data $fullAccess -FilePath $jsonPath -Format 'JSON' -Description 'Mailbox permissions - Full Access'
@@ -599,7 +598,7 @@ function Export-ExchangeMailboxPermissions {
 
     # SendAs
     try {
-        $sendAs = @(Get-RecipientPermission -Identity $UserPrincipalName -ErrorAction Stop)
+        $sendAs = @(Get-EXORecipientPermission -Identity $UserPrincipalName -ErrorAction Stop)
 
         $jsonPath = Join-Path $OutputFolder 'MailboxPermissions_SendAs.json'
         Export-EvidenceData -Data $sendAs -FilePath $jsonPath -Format 'JSON' -Description 'Mailbox permissions - SendAs'
@@ -648,7 +647,7 @@ function Export-ExchangeMailboxPermissions {
 
     # SendOnBehalf
     try {
-        $mailbox = Get-Mailbox -Identity $UserPrincipalName -ErrorAction Stop
+        $mailbox = Get-EXOMailbox -Identity $UserPrincipalName -Properties GrantSendOnBehalfTo -ErrorAction Stop
         $sendOnBehalf = $mailbox.GrantSendOnBehalfTo
 
         $sobData = @($sendOnBehalf | ForEach-Object {
@@ -701,7 +700,7 @@ function Export-ExchangeForwarding {
 
         # Check mailbox properties
         try {
-            $mailbox = Get-Mailbox -Identity $UserPrincipalName -ErrorAction Stop
+            $mailbox = Get-EXOMailbox -Identity $UserPrincipalName -PropertySets Delivery -ErrorAction Stop
 
             if (-not [string]::IsNullOrWhiteSpace($mailbox.ForwardingAddress)) {
                 $forwardingItems.Add([PSCustomObject]@{
@@ -728,7 +727,7 @@ function Export-ExchangeForwarding {
 
         # Check inbox rules
         try {
-            $rules = @(Get-InboxRule -Identity $UserPrincipalName -IncludeHidden -ErrorAction Stop)
+            $rules = @(Get-InboxRule -Identity $UserPrincipalName -ErrorAction Stop)
 
             foreach ($rule in $rules) {
                 if ($rule.ForwardTo) {
@@ -816,7 +815,7 @@ function Export-ExchangeCalendarDelegates {
 
     try {
         $calendarIdentity = Resolve-DefaultCalendarFolderIdentity -Mailbox $UserPrincipalName
-        $calPerms = @(Get-MailboxFolderPermission -Identity $calendarIdentity -ErrorAction Stop)
+        $calPerms = @(Get-EXOMailboxFolderPermission -Identity $calendarIdentity -ErrorAction Stop)
 
         $jsonPath = Join-Path $OutputFolder 'CalendarPermissions.json'
         Export-EvidenceData -Data $calPerms -FilePath $jsonPath -Format 'JSON' -Description 'Calendar folder permissions'
@@ -878,7 +877,7 @@ function Export-ExchangeTransportRules {
     try {
         $mailboxKeys = $null
         try {
-            $mailbox = Get-Mailbox -Identity $UserPrincipalName -ErrorAction Stop
+            $mailbox = Get-EXOMailbox -Identity $UserPrincipalName -ErrorAction Stop
             $mailboxKeys = Get-NormalizedRecipientKeys -Value @($mailbox, $UserPrincipalName)
         }
         catch {
