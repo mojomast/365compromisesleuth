@@ -329,9 +329,16 @@ function Connect-IncidentExchange {
                     # is invisible to ExchangeEvidence.psm1.  By invoking the
                     # connection inside EXO's own module scope, the context lives
                     # where every EXO cmdlet expects to find it.
+                    #
+                    # NOTE: We pass the hashtable as a single positional arg and
+                    # splat it inside the scriptblock.  Using @args directly would
+                    # flatten the hashtable into positional parameters.
                     $exoMod = Get-Module ExchangeOnlineManagement
                     if ($exoMod) {
-                        & $exoMod { Connect-ExchangeOnline @args -ErrorAction Stop } @authVariantParams
+                        & $exoMod {
+                            param([hashtable]$Params)
+                            Connect-ExchangeOnline @Params -ErrorAction Stop
+                        } $authVariantParams
                     }
                     else {
                         # Fallback: call directly (works when EXO is global)
