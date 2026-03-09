@@ -1057,10 +1057,10 @@ function New-IncidentSummary {
             -CaseFolder $CaseFolder `
             -UserPrincipalName $UserPrincipalName `
             -CasePaths $CasePaths `
-            -CollectedFiles $reportCollectedFiles `
-            -CollectionErrors $collectionErrors `
-            -Indicators $indicators `
-            -LogEntries $logEntries
+            -CollectedFiles @($reportCollectedFiles) `
+            -CollectionErrors @($collectionErrors) `
+            -Indicators @($indicators) `
+            -LogEntries @($logEntries)
 
         Export-EvidenceData -Data $htmlReport `
             -FilePath $htmlSummaryPath `

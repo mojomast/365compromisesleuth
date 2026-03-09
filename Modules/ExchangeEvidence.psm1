@@ -466,7 +466,7 @@ function Export-ExchangeInboxRules {
 
     try {
         $fallbackDomain = ($UserPrincipalName -split '@')[1]
-        $rules = @(Get-InboxRule -Mailbox $UserPrincipalName -IncludeHidden -ErrorAction Stop)
+        $rules = @(Get-InboxRule -Identity $UserPrincipalName -IncludeHidden -ErrorAction Stop)
 
         $jsonPath = Join-Path $OutputFolder 'InboxRules.json'
         Export-EvidenceData -Data $rules -FilePath $jsonPath -Format 'JSON' -Description 'Inbox rules (including hidden)'
@@ -728,7 +728,7 @@ function Export-ExchangeForwarding {
 
         # Check inbox rules
         try {
-            $rules = @(Get-InboxRule -Mailbox $UserPrincipalName -IncludeHidden -ErrorAction Stop)
+            $rules = @(Get-InboxRule -Identity $UserPrincipalName -IncludeHidden -ErrorAction Stop)
 
             foreach ($rule in $rules) {
                 if ($rule.ForwardTo) {

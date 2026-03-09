@@ -323,6 +323,18 @@ function Connect-IncidentExchange {
                     $authVariantParams = $authVariant.Parameters
                     Write-EvidenceLog "Exchange connection attempt using $($attempt.Name) with $($authVariant.Name)..." -Level Info
                     Connect-ExchangeOnline @authVariantParams -ErrorAction Stop
+
+                    # Re-import the EXO session module into global scope so that
+                    # cmdlets (Get-MailboxPermission, Get-TransportRule, etc.) are
+                    # visible to other .psm1 modules loaded in the same session.
+                    $exoModule = Get-Module -Name 'tmp*' | Where-Object {
+                        $_.ExportedCommands.ContainsKey('Get-Mailbox')
+                    } | Select-Object -First 1
+                    if ($exoModule) {
+                        Import-Module $exoModule -Global -DisableNameChecking -Force
+                        Write-EvidenceLog "Exchange session module '$($exoModule.Name)' promoted to global scope." -Level Info
+                    }
+
                     Write-EvidenceLog 'Exchange Online connected successfully.' -Level Success
                     return $true
                 }
