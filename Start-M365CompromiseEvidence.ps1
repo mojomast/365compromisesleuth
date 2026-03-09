@@ -94,10 +94,17 @@ if (-not $SkipExchange) {
 Import-Module (Join-Path $modulesPath 'Logging.psm1') -Force
 Import-Module (Join-Path $modulesPath 'Prerequisites.psm1') -Force
 Import-Module (Join-Path $modulesPath 'CaseFolder.psm1') -Force
-Import-Module (Join-Path $modulesPath 'Connection.psm1') -Force
 Import-Module (Join-Path $modulesPath 'EntraEvidence.psm1') -Force
-Import-Module (Join-Path $modulesPath 'ExchangeEvidence.psm1') -Force
 Import-Module (Join-Path $modulesPath 'Summary.psm1') -Force
+
+# Connection and ExchangeEvidence are dot-sourced (NOT imported as modules)
+# because EXO V3 REST cmdlets check the *calling module's* session state for
+# the connection context.  .psm1 modules each get their own session state, so
+# Connect-ExchangeOnline in Connection.psm1 stores the context where
+# ExchangeEvidence.psm1 can never see it.  Dot-sourcing puts all functions in
+# the script's scope, which shares the global session state.
+. (Join-Path $modulesPath 'Connection.ps1')
+. (Join-Path $modulesPath 'ExchangeEvidence.ps1')
 
 function Read-TargetUserPrincipalName {
     [CmdletBinding()]

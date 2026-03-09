@@ -1106,15 +1106,9 @@ function Export-ExchangeMessageTrace {
 }
 
 # ---------------------------------------------------------------------------
-# Module exports
+# When dot-sourced, all functions above are available in the caller's scope.
+# This file is NOT a .psm1 module because EXO V3 REST cmdlets require the
+# caller's session state to hold the connection context.  Dot-sourcing from
+# the orchestrator script ensures EXO cmdlets run in global scope where
+# Connect-ExchangeOnline stored the context.
 # ---------------------------------------------------------------------------
-Export-ModuleMember -Function @(
-    'Export-ExchangeMailboxDetails'
-    'Export-ExchangeInboxRules'
-    'Export-ExchangeMailboxPermissions'
-    'Export-ExchangeForwarding'
-    'Export-ExchangeCalendarDelegates'
-    'Export-ExchangeTransportRules'
-    'Export-ExchangeConnectors'
-    'Export-ExchangeMessageTrace'
-)

@@ -323,38 +323,10 @@ function Connect-IncidentExchange {
                     $authVariantParams = $authVariant.Parameters
                     Write-EvidenceLog "Exchange connection attempt using $($attempt.Name) with $($authVariant.Name)..." -Level Info
 
-                    # EXO V3 REST cmdlets look up the connection context in the
-                    # *calling module's* session state.  If we call Connect-ExchangeOnline
-                    # from Connection.psm1's scope, the context is stored here and
-                    # is invisible to ExchangeEvidence.psm1.  By invoking the
-                    # connection inside EXO's own module scope, the context lives
-                    # where every EXO cmdlet expects to find it.
-                    #
-                    # NOTE: We pass the hashtable as a single positional arg and
-                    # splat it inside the scriptblock.  Using @args directly would
-                    # flatten the hashtable into positional parameters.
-                    $exoMod = Get-Module ExchangeOnlineManagement
-                    if ($exoMod) {
-                        & $exoMod {
-                            param([hashtable]$Params)
-                            Connect-ExchangeOnline @Params -ErrorAction Stop
-                        } $authVariantParams
-                    }
-                    else {
-                        # Fallback: call directly (works when EXO is global)
-                        Connect-ExchangeOnline @authVariantParams -ErrorAction Stop
-                    }
-
-                    # Re-import the EXO session module into global scope so that
-                    # cmdlets (Get-MailboxPermission, Get-TransportRule, etc.) are
-                    # visible to other .psm1 modules loaded in the same session.
-                    $exoSession = Get-Module -Name 'tmp*' | Where-Object {
-                        $_.ExportedCommands.ContainsKey('Get-Mailbox')
-                    } | Select-Object -First 1
-                    if ($exoSession) {
-                        Import-Module $exoSession -Global -DisableNameChecking -Force
-                        Write-EvidenceLog "Exchange session module '$($exoSession.Name)' promoted to global scope." -Level Info
-                    }
+                    # This file is dot-sourced so Connect-ExchangeOnline runs in
+                    # the script's global scope.  EXO V3 stores its context in the
+                    # caller's session state, so the context is globally visible.
+                    Connect-ExchangeOnline @authVariantParams -ErrorAction Stop
 
                     Write-EvidenceLog 'Exchange Online connected successfully.' -Level Success
                     return $true
@@ -377,9 +349,8 @@ function Connect-IncidentExchange {
 }
 
 # ---------------------------------------------------------------------------
-# Module exports
+# When dot-sourced, all functions above are available in the caller's scope.
+# This file is NOT a .psm1 module because EXO V3 REST cmdlets require
+# Connect-ExchangeOnline to run in the same session state as the calling
+# code.  Dot-sourcing from the orchestrator ensures that.
 # ---------------------------------------------------------------------------
-Export-ModuleMember -Function @(
-    'Connect-IncidentServices'
-    'Disconnect-IncidentServices'
-)
