@@ -133,7 +133,9 @@ function Get-NormalizedRecipientKeys {
         Add-NormalizedRecipientKey -Keys $keys -Candidate $item
     }
 
-    return $keys
+    # Use comma operator to prevent PowerShell from enumerating/unwrapping
+    # the HashSet into individual strings when it has only one element.
+    return ,$keys
 }
 
 function Test-RecipientCollectionMatchesMailbox {
@@ -155,7 +157,16 @@ function Test-RecipientCollectionMatchesMailbox {
     }
 
     $recipientKeys = Get-NormalizedRecipientKeys -Value $Recipients
-    return $recipientKeys.Overlaps($MailboxKeys)
+    # PowerShell can unwrap a single-element HashSet to a bare string,
+    # so fall back to simple containment if .Overlaps() is unavailable.
+    if ($recipientKeys -is [System.Collections.Generic.HashSet[string]]) {
+        return $recipientKeys.Overlaps($MailboxKeys)
+    }
+    # Fallback: manual check
+    foreach ($key in @($recipientKeys)) {
+        if ($MailboxKeys.Contains($key)) { return $true }
+    }
+    return $false
 }
 
 function ConvertTo-PlainExchangeObject {
@@ -465,7 +476,18 @@ function Export-ExchangeInboxRules {
 
     try {
         $fallbackDomain = ($UserPrincipalName -split '@')[1]
-        $rules = @(Get-InboxRule -Identity $UserPrincipalName -ErrorAction Stop)
+        # Get-InboxRule -Identity resolves to the admin's own mailbox in some
+        # tenants.  -Mailbox targets the correct user.  Fall back to -Identity
+        # if -Mailbox is not available (older EXO module edge case).
+        try {
+            $rules = @(Get-InboxRule -Mailbox $UserPrincipalName -ErrorAction Stop)
+        }
+        catch {
+            if ($_.Exception.Message -match 'parameter.*Mailbox') {
+                $rules = @(Get-InboxRule -Identity $UserPrincipalName -ErrorAction Stop)
+            }
+            else { throw }
+        }
 
         $jsonPath = Join-Path $OutputFolder 'InboxRules.json'
         Export-EvidenceData -Data $rules -FilePath $jsonPath -Format 'JSON' -Description 'Inbox rules (including hidden)'
@@ -727,7 +749,15 @@ function Export-ExchangeForwarding {
 
         # Check inbox rules
         try {
-            $rules = @(Get-InboxRule -Identity $UserPrincipalName -ErrorAction Stop)
+            try {
+                $rules = @(Get-InboxRule -Mailbox $UserPrincipalName -ErrorAction Stop)
+            }
+            catch {
+                if ($_.Exception.Message -match 'parameter.*Mailbox') {
+                    $rules = @(Get-InboxRule -Identity $UserPrincipalName -ErrorAction Stop)
+                }
+                else { throw }
+            }
 
             foreach ($rule in $rules) {
                 if ($rule.ForwardTo) {
@@ -814,8 +844,20 @@ function Export-ExchangeCalendarDelegates {
     Write-EvidenceLog "Collecting calendar permissions for $UserPrincipalName..." -Level Info
 
     try {
-        $calendarIdentity = Resolve-DefaultCalendarFolderIdentity -Mailbox $UserPrincipalName
-        $calPerms = @(Get-EXOMailboxFolderPermission -Identity $calendarIdentity -ErrorAction Stop)
+        # Try the standard English path first, then resolve the localized
+        # folder name via Get-EXOMailboxFolderStatistics if that fails.
+        # First attempt: use well-known name "Calendar"
+        $calendarIdentity = "${UserPrincipalName}:\Calendar"
+        try {
+            $calPerms = @(Get-EXOMailboxFolderPermission -Identity $calendarIdentity -ErrorAction Stop)
+        }
+        catch {
+            # Likely a non-English locale (e.g. French "Calendrier").
+            # Resolve the actual default calendar folder name.
+            Write-EvidenceLog "Calendar folder not found at default path, resolving localized name..." -Level Info
+            $calendarIdentity = Resolve-DefaultCalendarFolderIdentity -Mailbox $UserPrincipalName
+            $calPerms = @(Get-EXOMailboxFolderPermission -Identity $calendarIdentity -ErrorAction Stop)
+        }
 
         $jsonPath = Join-Path $OutputFolder 'CalendarPermissions.json'
         Export-EvidenceData -Data $calPerms -FilePath $jsonPath -Format 'JSON' -Description 'Calendar folder permissions'
